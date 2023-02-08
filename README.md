@@ -2,11 +2,13 @@
 
 ## Purpose: Podcast Server
 
-RSS Feed.
+This exists because I don't care for podcast hosting fees.
 
 ---
 
-Extended description to come.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/L19579/L19_Santigold/main/imgs/reference_1.png">
+</p>
 
 ---
 
