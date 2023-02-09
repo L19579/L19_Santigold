@@ -26,7 +26,7 @@ version = "*"
 features = ["v4"]
 
 [dependencies.sqlx]
-version = ""
+version = "*"
 deafault-features = false
 features = [
   "runtime-actix-rustls",
@@ -39,4 +39,4 @@ features = [
 
 [dev-dependencies.reqwest]
 version = "*"
-features = "json"
+features = ["json"] 
