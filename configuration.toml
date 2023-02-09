@@ -1,0 +1,9 @@
+application_port = 8666
+
+[database]
+host = "127.0.0.1"
+port = "5432"
+username = "postgres"
+# password via command line.
+database_name = "entretien_podcasts"
+linode_object_storage = "https://entretien-podcast-bucket.us-east-1.linodeobjects.com"

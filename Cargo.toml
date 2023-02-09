@@ -3,6 +3,40 @@ name = "L19_Santigold"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[dependencies] # TODO, correct version numbers.
+mime = "*"
+config = "*"
+actix-web = "*"
+log = "*"
+tracing = "*"
+env_logger = "*"
+serde_json = "*"
+actix-cors = "*"
 
-[dependencies]
+[dependencies.tokio]
+version = "*"
+features = ["macros", "rt-multi-thread"]
+
+[dependencies.serde]
+version = "*"
+features = ["derive"]
+
+[dependencies.uuid]
+version = "*"
+features = ["v4"]
+
+[dependencies.sqlx]
+version = ""
+deafault-features = false
+features = [
+  "runtime-actix-rls",
+  "macros",
+  "postgres",
+  "uuid",
+  "chrono",
+  "migrate",
+]
+
+[dev-dependencies.reqwest]
+version = "*"
+features = "json"
