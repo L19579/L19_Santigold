@@ -1,9 +1,11 @@
+in_production_mode = false
 application_port = 8666
 
 [database]
 host = "127.0.0.1"
 port = "5432"
 username = "postgres"
-# password via command line.
-database_name = "entretien_podcasts"
-linode_object_storage = "https://entretien-podcast-bucket.us-east-1.linodeobjects.com"
+password = "fakepassword"
+test_database_name = "test_podcast_db"
+production_database_name = "podcast_db"
+linode_object_storage = "https://example-s3-type-bucket.linodeobjects.com"

@@ -18,6 +18,9 @@ pub use {
     },
     std::{
         net::TcpListener,
+        sync::{
+            Arc, RwLock,
+        },
     },
     routes::{
         podcast::*,
@@ -28,6 +31,8 @@ pub use {
 
 pub fn run(listener: TcpListener, db_conn_pool: PgPool)
 -> Result::<Server, std::io::Error>{
+    let xml_buffer = Arc::new(RwLock::new(String::new()));
+    let xml_buffer = web::Data::new(xml_buffer);
     let db_conn_pool = web::Data::new(db_conn_pool);
     let json_config = web::JsonConfig::default()
         .limit(10096) // raise this max TODO.
@@ -51,6 +56,7 @@ pub fn run(listener: TcpListener, db_conn_pool: PgPool)
             .route("/upload", web::post().to(upload))
             .app_data(json_config.clone())
             .app_data(db_conn_pool.clone())
+            .app_data(xml_buffer.clone())
     })
     .listen(listener)?
     .run();
