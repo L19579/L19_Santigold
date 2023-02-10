@@ -1,9 +1,15 @@
 use {
-    uuid::Uuid,
+    crate::{
+        web, 
+        HttpResponse,
+    },
     serde::{
         Serialize, Deserialize,
     },
-}
+    sqlx::{
+        Connection, PgPool,
+    },
+};
 
 #[derive(Serialize, Deserialize)]
 pub struct PodcastData{
@@ -14,7 +20,7 @@ pub struct PodcastData{
 #[derive(Serialize, Deserialize)]
 pub struct Channel{
     pub id: u8,
-    pub external_id: Uuid,
+    pub external_id: String,
     pub title: String,
     pub category: String,
     pub description: String,
@@ -34,12 +40,12 @@ pub struct Channel{
     pub itunes_owner_name: Option<String>,
     pub itunes_owner_email: Option<String>,
     pub sy_update_period: Option<String>,
-    pub sy__update_frequency: Option<String>,
+    pub sy_update_frequency: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct Item{
-    pub id: Uuid,
+    pub id: String,
     pub channel_id: u8,
     pub author: String,
     pub category: String,
@@ -51,4 +57,17 @@ pub struct Item{
     pub itunes_subtitles: Option<String>,
     pub itunes_image: Option<String>,
     pub itunes_duration: Option<String>,
+}
+
+/// GET RSS feed
+pub async fn feed() -> HttpResponse{
+    todo!();
+}
+
+/// POST episode
+pub async fn post_episode(
+    form: web::Json<PodcastData>,
+    pg_conn_pool: web::Data<PgPool>,
+) -> HttpResponse {
+    todo!();
 }

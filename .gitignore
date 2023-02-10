@@ -4,4 +4,5 @@
 /notes.txt
 /Cargo.lock
 /real_init_db.sh
+/real_init_test_db.sh
 /real_configuration.toml
