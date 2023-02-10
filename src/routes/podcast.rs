@@ -11,13 +11,13 @@ use {
     },
 };
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct PodcastData{
     pub channel: Channel,
     pub items: Vec<Item>
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Channel{
     pub id: u8,
     pub external_id: String,
@@ -43,7 +43,7 @@ pub struct Channel{
     pub sy_update_frequency: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Item{
     pub id: String,
     pub channel_id: u8,
@@ -61,13 +61,17 @@ pub struct Item{
 
 /// GET RSS feed
 pub async fn feed() -> HttpResponse{
-    todo!();
+    // tester
+    log::info!("/feed is reachable"); 
+    HttpResponse::Ok().finish()
 }
 
 /// POST episode
-pub async fn post_episode(
+pub async fn upload(
     form: web::Json<PodcastData>,
     pg_conn_pool: web::Data<PgPool>,
 ) -> HttpResponse {
-    todo!();
+    // tester
+    log::info!("/upload is reachable. JSON received: {:?}", form.into_inner()); 
+    HttpResponse::Ok().finish()
 }

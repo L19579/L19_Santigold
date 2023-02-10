@@ -14,17 +14,17 @@ pub fn get_configuration() -> Result<Settings, ConfigError>{
 
 #[derive(serde::Deserialize)]
 pub struct  Settings{
-    pub production_mode: bool,
+    pub in_production_mode: bool,
     pub application_port: String,
     pub database: DatabaseSettings,
 }
 
 impl Settings{
-    pub fn connection_string(&self) -> String{
-        let database_name = if self.production_mode{
-            self.database.production_database_name
+    pub fn database_connection_string(&self) -> String{
+        let database_name = if self.in_production_mode{
+            &self.database.production_database_name
         } else {
-            self.database.test_database_name
+            &self.database.test_database_name
         };
         return format!("postgres://{}:{}@{}:{}/{}",
                        self.database.username, self.database.password, 

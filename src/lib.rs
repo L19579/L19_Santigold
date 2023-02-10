@@ -14,6 +14,7 @@ pub use {
         HttpRequest, HttpServer,
         Responder, HttpResponse,
         middleware, dev::Server,
+        http::header::ContentType,
     },
     std::{
         net::TcpListener,
@@ -43,8 +44,11 @@ pub fn run(listener: TcpListener, db_conn_pool: PgPool)
             .wrap(middleware::Logger::default())
             .wrap(Cors::permissive()) // TODO CRTITICAL: temp
             .route("/health_check", web::get().to(health_check))
+            .route("/health_check_xml", web::get().to(health_check_xml))
+            .route("/health_check_xml_extended", web::get().to(health_check_xml_extended))
+            .route("/health_check_xml_extended_post", web::post().to(health_check_xml_extended_post))
             .route("/feed", web::get().to(feed))
-            .route("/post_episode", web::post().to(post_episode))
+            .route("/upload", web::post().to(upload))
             .app_data(json_config.clone())
             .app_data(db_conn_pool.clone())
     })
