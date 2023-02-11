@@ -2,7 +2,7 @@ use {
     crate::{
         Arc, RwLock,
         web, HttpResponse,
-        ContentType,
+        ContentType, Uuid
     },
     serde::{
         Serialize, Deserialize,
@@ -16,6 +16,8 @@ use {
     },
 };
 
+const NONE: String = String::from("NONE");
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PodcastData{
     pub channel: Channel,
@@ -24,7 +26,7 @@ pub struct PodcastData{
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Channel{
-    pub id: u8,
+    pub id: i32,
     pub external_id: String,
     pub title: String,
     pub category: String,
@@ -34,8 +36,8 @@ pub struct Channel{
     pub image_url: String,
     pub image_title : String,
     pub image_link: String,
-    pub image_width : u8,
-    pub image_height: u8,
+    pub image_width : i32,
+    pub image_height: i32,
     pub language: String,
     pub last_build_date: String,
     pub pub_date: String,
@@ -52,7 +54,7 @@ pub struct Channel{
 pub struct Item{
     pub id: String,
     pub channel_id: String,
-    pub ep_number: u32,
+    pub ep_number: i32,
     pub author: String,
     pub category: String,
     pub description: String,
@@ -81,11 +83,14 @@ pub async fn feed(xml_buffer: web::Data<Arc<RwLock<String>>>) -> HttpResponse{
 
 /// GET channels data - d 
 pub async fn channels(pg_conn_pool: web::Data<PgPool>) -> HttpResponse{
-    let channels: Vec<Channel> = sqlx::query!(r#"
-        SELECT * FROM channel
-        "#
-    ).fetch_all(pg_conn_pool.get_ref())
-    .await; 
+    let channels: Vec<Channel> = match sqlx::query_as!( Channel, 
+        r#" SELECT * FROM channel "#
+    )
+    .fetch_all(pg_conn_pool.get_ref())
+    .await {
+        Ok(chs) => chs,
+        Err(_) => Vec::new()
+    }; 
     
     if channels.len() < 1 {
         return HttpResponse::NoContent()
@@ -112,12 +117,15 @@ pub async fn episode(
     episode: web::Json<ItemAbbreviated>,
     pg_conn_pool: web::Data<PgPool>,
 ) -> HttpResponse{
-    match sqlx::query!(
-        r#"SELECT * FROM item WHERE id = $1"#, episode.into_inner().id
-    ).fetch_optional::<Item>(pg_conn_pool.get_ref())
-    .await{
+    match sqlx::query_as!(
+        Item,
+        r#"SELECT * FROM item WHERE id = $1"#, Uuid::parse_str(&episode.into_inner().id).unwrap()
+    ).fetch_optional(pg_conn_pool.get_ref())
+    .await
+    .unwrap(){
         Some(e) => {
-            let serialized_ep = serde_json::ser::to_string(e).unwrap(); // TODO error handling
+            // TODO error handling
+            let serialized_ep = serde_json::ser::to_string(&e).unwrap(); 
             return HttpResponse::Ok()
                 .content_type(ContentType::json())
                 .body(serialized_ep)
@@ -129,50 +137,108 @@ pub async fn episode(
     }
 }   
 
-/// POST modify episode metadata
+/// POST modify episode metadata - d
 pub async fn edit(
     episode: web::Json<Item>,
-    pg_conn_pool: web::Data<PgPool>
+    pg_conn_pool: &web::Data<PgPool>
 ) -> HttpResponse{
-    todo!();
+    let ep = episode.into_inner();
+
+    if !(episode_exists(&ep.id).await.is_ok()) {
+        return HttpResponse::BadRequest()
+            .body("episode does not exist");
+    }
+
+    sqlx::query!(r#"
+        UPDATE item SET channel_id = $1, ep_number = $2, title = $3, author = $4, description = $5,
+        content_encoded = $6, enclosure = $7, i_link = $8, pub_date = $9, itunes_subtitles = $10, 
+        itunes_image = $11, itunes_duration = $12 WHERE id = $13
+        "#, ep.channel_id, ep.ep_number, ep.author, ep.category, ep.description, ep.content_encoded, 
+        ep.enclosure, ep.i_link, ep.pub_date, ep.itunes_subtitles.unwrap_or(NONE.clone()),
+        ep.itunes_image.unwrap_or(NONE.clone()), ep.itunes_duration.unwrap_or(NONE.clone()), ep.id
+    ).execute().await;
+    return HttpResponse::Ok().finish();
 }
 
-/// POST Channel/Episode
+/// POST Channel/Episode - near // linode
 pub async fn upload(
     /* episode: web::Json<Item>, */
     podcast_data: web::Json<PodcastData>,
     pg_conn_pool: web::Data<PgPool>
 ) -> HttpResponse {
-    let podcast_data= podcast_data.into_inner();
+    let podcast_data = &podcast_data.into_inner();
+    let ch = &podcast_data.channel;
+    let eps: &[Item] = &podcast_data.items;
+    let mut potential_bad_ep_uploads = String::new();
+    eps.iter().for_each(|ep|{
+        if !(ch.external_id != ep.channel_id){
+            potential_bad_ep_uploads
+                .push_str(&format!("\n{}", ep.channel_id))
+        }
+    });
+
+    if potential_bad_ep_uploads.len() != 0 {
+        return HttpResponse::BadRequest()
+            .body(format!("wrong channel_id's for episodes: \n{}", potential_bad_ep_uploads));
+    }
+
+    store_to_db(podcast_data, &pg_conn_pool);
+
+    refresh_xml_buffer().unwrap(); 
+    HttpResponse::Ok().finish()
+}
+
+/// check that channel exists in db and on linode. - near // linode
+async fn channel_exists(ch_id: &str) -> Result<(), &'static str>{
+    let res = match sqlx::query!(
+        "r# SELECT id FROM channel WHERE external_id = $1 #", ch_id
+    ).fetch_optional::<Channel>()
+        .get_ref()
+        .await{
+            Some(_) => true,
+            None => false,
+    };
+    return Ok(());
+}
+
+/// check that episode exists in db and on linode. - near // linode
+async fn episode_exists(ep_id: &str) -> Result<(), &'static str>{
+    let res = match sqlx::query!(
+        r#" SELECT ep_number FROM item WHERE id = $1 "#, ep_id
+    ).fetch_optional::<Item>()
+        .get_ref()
+        .await{
+            Some(_) => true,
+            None => false,
+    };
+    return Ok(());
+}
+
+/// store episode data in db - d 
+async fn store_to_db(podcast_data: &PodcastData, pg_conn_pool: &web::Data<PgPool>) 
+-> Result<(), &'static str>{
+    //TODO temp, this should rarely fail. Error is worth attention if it does.
+    //Work on error handling.
     let ch = podcast_data.channel;
     let eps: Vec<Item> = podcast_data.items;
-    let mut potential_bad_ep_uploads = String::new();
-    if !channel_exists(ch.external_id){
+
+    if !(channel_exists(&ch.external_id).await.is_ok()) {
         sqlx::query!(r#"
             INSERT INTO channel (external_id, title, category, description, managing_editor,
             generator, image_url, image_title, image_link, image_width, image_height, language,
             last_build_date, pub_date, c_link, itunes_new_feed_url, itunes_explicit, itunes_owner_name,
             itunes_owner_email, sy_update_period, sy_update_frequency)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-            $17, $18, $19, $20, $21, $22)
-            "#, ch.external_id, ch.title, ch.category, ch.description, ch.managing_editor, ch.generator,
+            $17, $18, $19, $20, $21)
+            "#, Uuid::parse_str(&ch.external_id).unwrap(), ch.title, ch.category, ch.description, ch.managing_editor, ch.generator, //TODO: unwrap here.
             ch.image_url, ch.image_title, ch.image_link, ch.image_width, ch.image_height, ch.language,
-            ch.last_build_date, ch.pub_date, ch.c_link, ch.itunes_new_feed_url, ch.itunes_explicit,
-            ch.itunes_owner_name, ch.itunes_owner_email, ch.sy_update_period, ch.sy_update_frequency
+            ch.last_build_date, ch.pub_date, ch.c_link, ch.itunes_new_feed_url.unwrap_or(NONE.clone()), 
+            ch.itunes_explicit.unwrap_or(false), ch.itunes_owner_name.unwrap_or(NONE.clone()), 
+            ch.itunes_owner_email.unwrap_or(NONE.clone()), ch.sy_update_period.unwrap_or(NONE.clone()), 
+            ch.sy_update_frequency.unwrap_or(NONE.clone())
         ).execute(pg_conn_pool.get_ref())
         .await;
-    } else {
-        eps.iter().for_each(|ep|{
-            if !(ch.external_id != ep.channel_id){
-                potential_bad_ep_uploads
-                    .push_str(&format!("\n{}", ep.channel_id))
-            }
-        });
-    }
-    if potential_bad_ep_uploads.len() != 0 {
-        return HttpResponse::BadRequest()
-            .body("channel_id for one or more episodes does not match");
-    }
+    } 
 
     sqlx::query!(r#"
         INSERT INTO item (id, channel_id, ep_number, title, author, description, content_encoded, 
@@ -183,20 +249,8 @@ pub async fn upload(
         ep.itunes_image.unwrap_or("NONE"), ep.itunes_duration.unwrap_or("NONE"),
     ).execute(pg_conn_pool.get_ref())
     .await;     
-    //TODO temp, this should rarely fail. Error is worth attention if it does.
-    //Work on error handling.
-    refresh_xml_buffer().unwrap(); 
-    HttpResponse::Ok().finish()
-}
 
-/// check that channel exists in db and on linode.
-fn channel_exists(channel_id: String) -> bool{
-    todo!()
-}
-
-/// store episode data in db
-fn store_to_db(podcast_data: &PodcastData) -> Result<(), &'static str>{
-    todo!()
+    return Ok(()); 
 }
 
 /// refresh xml with updated db data
