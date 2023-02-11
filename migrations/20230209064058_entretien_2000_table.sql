@@ -36,7 +36,7 @@ CREATE TABLE channel(
 
 CREATE TABLE item(
   id uuid NOT NULL,
-  channel_id TEXT NOT NULL,
+  channel_id uuid NOT NULL,
   ep_number INT NOT NULL,
   title TEXT NOT NULL,
   -- author's email address
