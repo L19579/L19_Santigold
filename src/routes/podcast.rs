@@ -29,7 +29,7 @@ pub struct Channel{
     pub title: String,
     pub category: String,
     pub description: String,
-    pub managingEditor: String,
+    pub managing_editor: String,
     pub generator: String,
     pub image_url: String,
     pub image_title : String,
@@ -52,6 +52,7 @@ pub struct Channel{
 pub struct Item{
     pub id: String,
     pub channel_id: String,
+    pub ep_number: u32,
     pub author: String,
     pub category: String,
     pub description: String,
@@ -70,7 +71,7 @@ pub struct ItemAbbreviated{
     pub channel_id: u8,
 }
 
-/// GET RSS feed
+/// GET RSS feed - d 
 pub async fn feed(xml_buffer: web::Data<Arc<RwLock<String>>>) -> HttpResponse{
     let body: String = xml_buffer.read().unwrap().clone();
     return HttpResponse::Ok()
@@ -78,39 +79,55 @@ pub async fn feed(xml_buffer: web::Data<Arc<RwLock<String>>>) -> HttpResponse{
         .body(body)
 }
 
-/// GET channels data
+/// GET channels data - d 
 pub async fn channels(pg_conn_pool: web::Data<PgPool>) -> HttpResponse{
     let channels: Vec<Channel> = sqlx::query!(r#"
         SELECT * FROM channel
         "#
     ).fetch_all(pg_conn_pool.get_ref())
     .await; 
-    let response_ser_json = String::from("{");
-    let http_response = HttpResponse::Ok;
+    
+    if channels.len() < 1 {
+        return HttpResponse::NoContent()
+            .body("No channels in DB");
+    }
+    
+    let mut response_ser_json = String::new();
     channels.into_iter().for_each(|c|{
-        let serialized_c = match serde_json::ser::to_string(&c){
-            Ok(c) => &c,
-            Err(_) => {
-                return HttpResponse::InternalServerError() // TODO return no bueno.
-                    .body("Error building channels Json");
-            }
-        };
-        response_ser_json.push_str(serialized_c);
+        let serialized_c = serde_json::ser::to_string(&c).unwrap(); // TODO - error handling;
+        response_ser_json.push_str(&serialized_c);
     });
-    response_ser_json.push_str("}");
+
+    if channels.len() > 1 {
+        response_ser_json = format!("{{{}}}", response_ser_json);
+    }
     
     return HttpResponse::Ok()
         .content_type(ContentType::json())
         .body(response_ser_json);
 }
 
-/// GET episode metadata
+/// GET episode metadata - d
 pub async fn episode(
     episode: web::Json<ItemAbbreviated>,
     pg_conn_pool: web::Data<PgPool>,
 ) -> HttpResponse{
-    todo!();
-}
+    match sqlx::query!(
+        r#"SELECT * FROM item WHERE id = $1"#, episode.into_inner().id
+    ).fetch_optional::<Item>(pg_conn_pool.get_ref())
+    .await{
+        Some(e) => {
+            let serialized_ep = serde_json::ser::to_string(e).unwrap(); // TODO error handling
+            return HttpResponse::Ok()
+                .content_type(ContentType::json())
+                .body(serialized_ep)
+        },
+        None => {
+            return HttpResponse::NoContent()
+                .body("No channels in DB");
+        }
+    }
+}   
 
 /// POST modify episode metadata
 pub async fn edit(
@@ -122,22 +139,47 @@ pub async fn edit(
 
 /// POST Channel/Episode
 pub async fn upload(
-    episode: web::Json<Item>,
+    /* episode: web::Json<Item>, */
+    podcast_data: web::Json<PodcastData>,
     pg_conn_pool: web::Data<PgPool>
 ) -> HttpResponse {
-    
-    let ep = episode.into_inner();
-    if !channel_exists(ep.channel_id){
-        return HttpResponse::InternalServerError()
-            .body("Channel does not exist")
+    let podcast_data= podcast_data.into_inner();
+    let ch = podcast_data.channel;
+    let eps: Vec<Item> = podcast_data.items;
+    let mut potential_bad_ep_uploads = String::new();
+    if !channel_exists(ch.external_id){
+        sqlx::query!(r#"
+            INSERT INTO channel (external_id, title, category, description, managing_editor,
+            generator, image_url, image_title, image_link, image_width, image_height, language,
+            last_build_date, pub_date, c_link, itunes_new_feed_url, itunes_explicit, itunes_owner_name,
+            itunes_owner_email, sy_update_period, sy_update_frequency)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+            $17, $18, $19, $20, $21, $22)
+            "#, ch.external_id, ch.title, ch.category, ch.description, ch.managing_editor, ch.generator,
+            ch.image_url, ch.image_title, ch.image_link, ch.image_width, ch.image_height, ch.language,
+            ch.last_build_date, ch.pub_date, ch.c_link, ch.itunes_new_feed_url, ch.itunes_explicit,
+            ch.itunes_owner_name, ch.itunes_owner_email, ch.sy_update_period, ch.sy_update_frequency
+        ).execute(pg_conn_pool.get_ref())
+        .await;
+    } else {
+        eps.iter().for_each(|ep|{
+            if !(ch.external_id != ep.channel_id){
+                potential_bad_ep_uploads
+                    .push_str(&format!("\n{}", ep.channel_id))
+            }
+        });
+    }
+    if potential_bad_ep_uploads.len() != 0 {
+        return HttpResponse::BadRequest()
+            .body("channel_id for one or more episodes does not match");
     }
 
     sqlx::query!(r#"
-        INSERT INTO item (id, channel_id, title, author, description, content_encoded, 
+        INSERT INTO item (id, channel_id, ep_number, title, author, description, content_encoded, 
         enclosure, i_link, pub_date, itunes_subtitles, itunes_image. itunes_duration)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-        "#, ep.id, ep.channel_id, ep.author, ep.category, ep.description, ep.content_encoded,
-        ep.enclosure, ep.i_link, ep.pub_date, ep.itunes_subtitles.unwrap_or("NONE"),
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        "#, ep.id, ep.channel_id, ep.ep_number, ep.author, ep.category, ep.description, 
+        ep.content_encoded, ep.enclosure, ep.i_link, ep.pub_date, ep.itunes_subtitles.unwrap_or("NONE"),
         ep.itunes_image.unwrap_or("NONE"), ep.itunes_duration.unwrap_or("NONE"),
     ).execute(pg_conn_pool.get_ref())
     .await;     
