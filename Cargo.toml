@@ -12,6 +12,7 @@ tracing = "*"
 env_logger = "*"
 serde_json = "*"
 actix-cors = "*"
+aws-sdk-s3 = "0.24.0"
 
 [dependencies.tokio]
 version = "*"
@@ -36,6 +37,14 @@ features = [
   "chrono",
   "migrate",
 ]
+
+[dependencies.aws-smithy-http]
+version = "0.54.3"
+features = ["aws-smithy-eventstream"]
+
+[dependencies.aws-credential-types]
+version = "0.54.1"
+features = ["hardcoded-credentials"]
 
 [dev-dependencies.reqwest]
 version = "*"

@@ -2,10 +2,10 @@ use {
     crate::{
         Arc, RwLock,
         web, HttpResponse,
-        ContentType
+        ContentType, S3Client,
     },
     serde::{
-        Serialize, Deserialize, de
+        Serialize, Deserialize,
     },
     sqlx::{
         Connection, PgPool,
@@ -13,9 +13,11 @@ use {
     },
     uuid::Uuid as native_Uuid,
     std::{
+        time::Duration,
         fs::File,
         result::Result,
     },
+    
 };
 
 pub fn none() -> String{
@@ -79,6 +81,11 @@ pub struct ItemAbbreviated{
     pub channel_id: u8,
 }
 
+pub struct S3{
+    pub client: S3Client,
+    pub bucket: String,
+}
+
 /// GET RSS feed - d
 pub async fn feed(xml_buffer: web::Data<Arc<RwLock<String>>>) -> HttpResponse{
     let body: String = xml_buffer.read().unwrap().clone();
@@ -89,16 +96,6 @@ pub async fn feed(xml_buffer: web::Data<Arc<RwLock<String>>>) -> HttpResponse{
 
 /// GET channels data - d
 pub async fn channels(pg_conn_pool: web::Data<PgPool>) -> HttpResponse{
-    /* 
-    let channels: Vec<Channel> =  match sqlx::query_as!( Channel,
-        r#" SELECT * FROM channel "#
-    )
-    .fetch_all(pg_conn_pool.get_ref())
-    .await{
-        Ok(chs) => chs,
-        Err(_) => Vec::new()
-    };
-    */
     let channels: Vec<_> =  match sqlx::query!(
         r#" SELECT * FROM channel "#
     )
@@ -179,7 +176,7 @@ pub async fn episode(
     };
 
     // No clean way to do this right now. Refactor.
-    let res_body = Item{
+    let ep = Item{
         id: res.id.to_string(),
         channel_id: res.channel_id.to_string(),
         description: res.description,
@@ -195,23 +192,33 @@ pub async fn episode(
         itunes_image: Some(res.itunes_image),
         itunes_duration: Some(res.itunes_duration), // TODO: correct, we won't always expect this to be filled.
     };
-   
-    todo!(); 
+
+    let response_ser_json = serde_json::ser::to_string(&ep).unwrap(); 
+    let response_ser_json = format!("{{{}}}", response_ser_json);
+
+    return HttpResponse::Ok()
+        .content_type(ContentType::json())
+        .body(response_ser_json);
+
+    /* HttpResponse::Ok() // --- cleaner tbh
+        .json(res_body);
+    */
 }
 
 /// POST modify episode metadata - d
-pub async fn edit(
-    episode: web::Json<Item>,
-    pg_conn_pool: &web::Data<PgPool>
+pub async fn edit_episode(
+    updated_ep: web::Json<Item>,
+    pg_conn_pool: &web::Data<PgPool>,
+    s3: &web::Data<S3>
 ) -> HttpResponse{
-    let ep = episode.into_inner();
+    let ep = updated_ep.into_inner();
 
-    if !(episode_exists(&Uuid::parse_str(&ep.id).unwrap(), &pg_conn_pool).await.is_ok()) { // TODO refactor
+    if !(episode_exists(&Uuid::parse_str(&ep.id).unwrap(), &pg_conn_pool, &s3).await) { // TODO refactor
         return HttpResponse::BadRequest()
             .body("episode does not exist");
     }
 
-    sqlx::query!(r#"
+    match sqlx::query!(r#"
         UPDATE item SET channel_id = $1, ep_number = $2, title = $3, author = $4, description = $5,
         content_encoded = $6, enclosure = $7, i_link = $8, pub_date = $9, itunes_subtitle = $10,
         itunes_image = $11, itunes_duration = $12 WHERE id = $13
@@ -219,15 +226,48 @@ pub async fn edit(
         ep.content_encoded, ep.enclosure, ep.i_link, ep.pub_date, ep.itunes_subtitle.unwrap_or(none()),
         ep.itunes_image.unwrap_or(none()), ep.itunes_duration.unwrap_or(none()),
         Uuid::parse_str(&ep.id).unwrap()
-    ).execute(pg_conn_pool.get_ref()).await;
-    return HttpResponse::Ok().finish();
+    ).execute(pg_conn_pool.get_ref()).await{
+        Ok(_) => HttpResponse::Ok().finish(),
+        Err(_) => HttpResponse::InternalServerError().body("Failed to edit DB"),
+    }
+}
+
+/// POST modify channel metadata - d
+pub async fn edit_channel(
+    updated_ch: web::Json<Channel>,
+    pg_conn_pool: &web::Data<PgPool>,
+) -> HttpResponse {
+    let ch = updated_ch.into_inner();
+    if!(channel_exists(&Uuid::parse_str(&ch.external_id).unwrap(), &pg_conn_pool).await) {
+        return HttpResponse::BadRequest()
+            .body("channel does not exist");
+    };
+
+    match sqlx::query!(r#"
+            UPDATE channel SET title = $1, category = $2, description = $3,  
+            managing_editor = $4, generator = $5, image_url = $6, image_title = $7, 
+            image_link = $8, image_width = $9, image_height = $10, language = $11, 
+            last_build_date = $12, pub_date = $13, c_link = $14, itunes_new_feed_url = $15, 
+            itunes_explicit = $16, itunes_owner_name = $17, itunes_owner_email = $18, 
+            sy_update_period = $19, sy_update_frequency = $20 WHERE external_id = $21
+        "#, ch.title, ch.category, ch.description, ch.managing_editor, ch.generator, 
+        ch.image_url, ch.image_title, ch.image_link, ch.image_width, ch.image_height,
+        ch.language, ch.last_build_date, ch.pub_date, ch.c_link, ch.itunes_new_feed_url.unwrap_or(none()),
+        ch.itunes_explicit.unwrap_or(false), ch.itunes_owner_name.unwrap_or(none()), 
+        ch.itunes_owner_email.unwrap_or(none()), ch.sy_update_period.unwrap_or(none()),
+        ch.sy_update_frequency.unwrap_or(none()), Uuid::parse_str(&ch.external_id).unwrap()
+    ).execute(pg_conn_pool.get_ref()).await{
+        Ok(_) => HttpResponse::Ok().finish(),
+        Err(_) => HttpResponse::InternalServerError().body("Failed to edit DB"),
+    }
 }
 
 /// POST Channel/Episode - near // linode
 pub async fn upload(
     /* episode: web::Json<Item>, */
     podcast_data: web::Json<PodcastData>,
-    pg_conn_pool: web::Data<PgPool>
+    pg_conn_pool: web::Data<PgPool>,
+    xml_buffer: web::Data<Arc<RwLock<String>>>
 ) -> HttpResponse {
     let podcast_data = &podcast_data.into_inner();
     let ch = &podcast_data.channel;
@@ -245,48 +285,67 @@ pub async fn upload(
             .body(format!("wrong channel_id's for episodes: \n{}", potential_bad_ep_uploads));
     }
 
-    store_to_db(podcast_data, &pg_conn_pool);
+    store_to_db(podcast_data, &pg_conn_pool).await.unwrap();
 
-    refresh_xml_buffer().unwrap();
+    refresh_xml_buffer(&xml_buffer).unwrap();
     HttpResponse::Ok().finish()
 }
 
-/// check that channel exists in db and on linode. - near // linode
-async fn channel_exists(ch_id: &Uuid, pg_conn_pool: &web::Data<PgPool>)
--> Result<(), &'static str>{
-    let res = match sqlx::query!(
+/// check that channel exists in db and on linode. - near
+async fn channel_exists(ch_id: &Uuid, pg_conn_pool: &web::Data<PgPool>
+)-> bool{
+    match sqlx::query!(
         r#" SELECT id FROM channel WHERE external_id = $1 "#, ch_id
     ).fetch_optional(pg_conn_pool.get_ref())
         .await
         .unwrap(){ // TODO: unwrap
             Some(_) => true,
             None => false,
-    };
-    return Ok(());
+    }
 }
 
-/// check that episode exists in db and on linode. - near // linode
-async fn episode_exists(ep_id: &Uuid, pg_conn_pool: &web::Data<PgPool>) -> Result<(), &'static str>{
-    let res = match sqlx::query!(
+/// check that episode exists in db and on linode. - d / messy
+async fn episode_exists(
+    ep_id: &Uuid, 
+    pg_conn_pool: &web::Data<PgPool>,
+    s3: &web::Data<S3>
+) -> bool{
+    _ = match sqlx::query!(
         r#" SELECT ep_number FROM item WHERE id = $1 "#, ep_id
     ).fetch_optional(pg_conn_pool.get_ref())
         .await
         .unwrap(){
-            Some(_) => true,
-            None => false,
+            Some(_) => (),
+            None => { return false; },
     };
-    return Ok(());
+    
+    let (s3_client, s3_bucket) = (
+        s3.get_ref().client.clone(),
+        s3.get_ref().bucket.clone(),
+    );
+
+    match s3_client
+        .get_object_acl()
+        .key(format!("{}.mp3", ep_id.to_string()))
+        .bucket(s3_bucket)
+        .send()
+        .await{
+            Ok(_) => true,
+            Err (_) => false,
+    }
 }
 
 /// store episode data in db - d
-async fn store_to_db(podcast_data: &PodcastData, pg_conn_pool: &web::Data<PgPool>)
--> Result<(), &'static str>{
-    //TODO temp, this should rarely fail. Error is worth attention if it does.
+async fn store_to_db(
+    podcast_data: &PodcastData, 
+    pg_conn_pool: &web::Data<PgPool>,
+)-> Result<(), &'static str>{
+    //TODO temp, this should rarely fail. Error is worth attention when it does.
     //Work on error handling.
     let ch = podcast_data.channel.clone(); // redo.
     let eps: &[Item] = &podcast_data.items;
 
-    if !(channel_exists(&Uuid::parse_str(&ch.external_id).unwrap(), &pg_conn_pool).await.is_ok()) {
+    if !(channel_exists(&Uuid::parse_str(&ch.external_id).unwrap(), &pg_conn_pool).await){
         sqlx::query!(r#"
             INSERT INTO channel (external_id, title, category, description, managing_editor,
             generator, image_url, image_title, image_link, image_width, image_height, language,
@@ -321,7 +380,7 @@ async fn store_to_db(podcast_data: &PodcastData, pg_conn_pool: &web::Data<PgPool
 }
 
 /// refresh xml with updated db data
-fn refresh_xml_buffer() -> Result<(), &'static str>{
-    // create file if it doesn't exist;
+fn refresh_xml_buffer(xml_buffer: &web::Data<Arc<RwLock<String>>>) -> Result<(), &'static str>{
+    
     todo!()
 }

@@ -6,6 +6,7 @@ pub use {
     tracing,
     uuid::Uuid,
     actix_cors::Cors,
+    aws_credential_types::Credentials,
     sqlx::{
         Connection, PgPool,
     },
@@ -15,6 +16,14 @@ pub use {
         Responder, HttpResponse,
         middleware, dev::Server,
         http::header::ContentType,
+    },
+    aws_sdk_s3::{
+        model::ObjectCannedAcl,
+        presigning::config::PresigningConfig,
+        Client as S3Client, Config, Region,
+    },
+    aws_smithy_http::{
+        body::SdkBody
     },
     std::{
         net::TcpListener,
@@ -29,11 +38,12 @@ pub use {
     configuration::*,
 };
 
-pub fn run(listener: TcpListener, db_conn_pool: PgPool)
+pub fn run(listener: TcpListener, db_conn_pool: PgPool, s3_client: S3)
 -> Result::<Server, std::io::Error>{
     let xml_buffer = Arc::new(RwLock::new(String::new()));
     let xml_buffer = web::Data::new(xml_buffer);
     let db_conn_pool = web::Data::new(db_conn_pool);
+    let s3_client = web::Data::new(s3_client);
     let json_config = web::JsonConfig::default()
         .limit(10096) // raise this max TODO.
         .content_type(|mime| mime == mime::APPLICATION_JSON)
@@ -56,6 +66,7 @@ pub fn run(listener: TcpListener, db_conn_pool: PgPool)
             .route("/upload", web::post().to(upload))
             .app_data(json_config.clone())
             .app_data(db_conn_pool.clone())
+            .app_data(s3_client.clone())
             .app_data(xml_buffer.clone())
     })
     .listen(listener)?

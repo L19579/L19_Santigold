@@ -8,4 +8,10 @@ username = "postgres"
 password = "fakepassword"
 test_database_name = "test_podcast_db"
 production_database_name = "podcast_db"
-linode_object_storage = "https://example-s3-type-bucket.linodeobjects.com"
+
+[s3_bucket]
+access_key = "FAKEACCESSKEY" 
+secret_access_key = "FAKESERCRETACCESSKEY"
+region = "us-east-1"
+bucket = "fake-bucket"
+endpoint_url = "https://us-east-1.linodeobjects.com/" 
