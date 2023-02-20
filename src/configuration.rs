@@ -13,9 +13,10 @@ pub fn get_configuration() -> Result<Settings, ConfigError>{
 }
 
 #[derive(serde::Deserialize, Clone)]
-pub struct  Settings{
+pub struct Settings{
     pub in_production_mode: bool,
     pub application_port: String,
+    pub temp_dir: String,
     pub database: DatabaseSettings,
     pub s3_bucket: S3Bucket,
 }
@@ -41,7 +42,6 @@ pub struct DatabaseSettings{
     pub password: String,
     pub production_database_name: String,
     pub test_database_name: String,
-    pub linode_object_storage: String,
 }
 
 #[derive(serde::Deserialize, Clone)]

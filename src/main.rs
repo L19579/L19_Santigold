@@ -29,6 +29,7 @@ async fn main() -> std::io::Result<()> {
     let s3 = S3{
         client: S3Client::from_conf(s3_conf),
         bucket: s3_config.bucket,
+        temp_dir: config.temp_dir,
     };
 
     let address = format!("127.0.0.1:{}", config.application_port);

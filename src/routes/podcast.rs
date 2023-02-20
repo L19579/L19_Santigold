@@ -3,9 +3,14 @@ use {
         Arc, RwLock,
         web, HttpResponse,
         ContentType, S3Client,
+        Multipart, ByteStream,
+        AggregatedBytes,
     },
     serde::{
         Serialize, Deserialize,
+    },
+    futures::{
+        StreamExt, TryStreamExt,
     },
     sqlx::{
         Connection, PgPool,
@@ -13,9 +18,12 @@ use {
     },
     uuid::Uuid as native_Uuid,
     std::{
-        time::Duration,
         fs::File,
+        time::Duration,
         result::Result,
+        io::Write,
+        path::Path,
+        fmt::Display,
     },
     
 };
@@ -27,7 +35,8 @@ pub fn none() -> String{
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PodcastData{
     pub channel: Channel,
-    pub items: Vec<Item>
+    pub items: Vec<Item>,
+    pub file_ids: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -81,9 +90,11 @@ pub struct ItemAbbreviated{
     pub channel_id: u8,
 }
 
+#[derive(Clone, Debug)]
 pub struct S3{
     pub client: S3Client,
     pub bucket: String,
+    pub temp_dir: String,
 }
 
 /// GET RSS feed - d
@@ -107,6 +118,7 @@ pub async fn channels(pg_conn_pool: web::Data<PgPool>) -> HttpResponse{
 
     if channels.len() < 1 {
         return HttpResponse::NoContent()
+            .content_type(ContentType::plaintext())
             .body("No channels in DB");
     }
 
@@ -215,6 +227,7 @@ pub async fn edit_episode(
 
     if !(episode_exists(&Uuid::parse_str(&ep.id).unwrap(), &pg_conn_pool, &s3).await) { // TODO refactor
         return HttpResponse::BadRequest()
+            .content_type(ContentType::plaintext())
             .body("episode does not exist");
     }
 
@@ -228,7 +241,9 @@ pub async fn edit_episode(
         Uuid::parse_str(&ep.id).unwrap()
     ).execute(pg_conn_pool.get_ref()).await{
         Ok(_) => HttpResponse::Ok().finish(),
-        Err(_) => HttpResponse::InternalServerError().body("Failed to edit DB"),
+        Err(_) => HttpResponse::InternalServerError()
+            .content_type(ContentType::plaintext())
+            .body("Failed to edit DB"),
     }
 }
 
@@ -240,6 +255,7 @@ pub async fn edit_channel(
     let ch = updated_ch.into_inner();
     if!(channel_exists(&Uuid::parse_str(&ch.external_id).unwrap(), &pg_conn_pool).await) {
         return HttpResponse::BadRequest()
+            .content_type(ContentType::plaintext())
             .body("channel does not exist");
     };
 
@@ -258,19 +274,58 @@ pub async fn edit_channel(
         ch.sy_update_frequency.unwrap_or(none()), Uuid::parse_str(&ch.external_id).unwrap()
     ).execute(pg_conn_pool.get_ref()).await{
         Ok(_) => HttpResponse::Ok().finish(),
-        Err(_) => HttpResponse::InternalServerError().body("Failed to edit DB"),
+        Err(_) => HttpResponse::InternalServerError()
+            .content_type(ContentType::plaintext())
+            .body("Failed to edit DB"),
     }
 }
 
+/// Post media - d 
+// TODO should integrate this with upload_form() once working example complete; + unwraps 
+pub async fn upload_object(mut payload: Multipart, s3: web::Data<S3>) -> HttpResponse{
+    let mut file_id = String::new();
+    while let Ok(Some(mut field)) = payload.try_next().await{
+        let temp_dir = s3.get_ref().temp_dir.clone();
+        file_id = Uuid::new_v4().to_string();
+        let temp_file = format!("{}/{}.mp3", temp_dir, file_id);
+        let mut file = web::block(move|| std::fs::File::create(temp_file))
+            .await
+            .unwrap().unwrap(); //review
+        while let  Some(chunk) = field.next().await{
+            let data = chunk.unwrap();
+            file = web::block(move|| file.write_all(&data).map(|_| file) )
+                .await
+                .unwrap().unwrap() // review
+        }
+    }
+    return HttpResponse::Ok()
+        .content_type(ContentType::plaintext())
+        .body(file_id);
+}
+
 /// POST Channel/Episode - near // linode
-pub async fn upload(
+pub async fn upload_form(
     /* episode: web::Json<Item>, */
+    s3: web::Data<S3>,
     podcast_data: web::Json<PodcastData>,
     pg_conn_pool: web::Data<PgPool>,
     xml_buffer: web::Data<Arc<RwLock<String>>>
 ) -> HttpResponse {
     let podcast_data = &podcast_data.into_inner();
     let ch = &podcast_data.channel;
+    if podcast_data.items.len() != podcast_data.file_ids.len(){
+        return HttpResponse::BadRequest()
+            .content_type(ContentType::plaintext())
+            .body("items.len() != file_ids.len()");
+        
+    }
+    for file_id in &podcast_data.file_ids {
+        if !Path::new(file_id).exists(){
+            return HttpResponse::BadRequest()
+                .content_type(ContentType::plaintext())
+                .body("at least 1 file_id does not exist");
+        } 
+    }
     let eps: &[Item] = &podcast_data.items;
     let mut potential_bad_ep_uploads = String::new();
     eps.iter().for_each(|ep|{
@@ -279,19 +334,45 @@ pub async fn upload(
                 .push_str(&format!("\n{}", ep.channel_id))
         }
     });
-
     if potential_bad_ep_uploads.len() != 0 {
         return HttpResponse::BadRequest()
+            .content_type(ContentType::plaintext())
             .body(format!("wrong channel_id's for episodes: \n{}", potential_bad_ep_uploads));
     }
 
     store_to_db(podcast_data, &pg_conn_pool).await.unwrap();
-
+    upload_to_s3_bucket(&podcast_data.file_ids, &s3).await.unwrap();
     refresh_xml_buffer(&xml_buffer).unwrap();
     HttpResponse::Ok().finish()
 }
 
-/// check that channel exists in db and on linode. - near
+// TODO: partial upload if some succeed. CRITICAL - leaves good uploads on server if all fail.
+// Note impl Display for test.
+/// upload to s3, failure control not implemented
+async fn upload_to_s3_bucket(file_ids: &[impl Display], s3: &web::Data<S3>) -> Result<(), &'static str>{
+    let s3 = s3.get_ref();
+    for file_id in file_ids{
+        let stream = ByteStream::from_path(&format!("{}/{}", s3.temp_dir, file_id))
+            .await
+            .unwrap();
+        let upload_ok = match s3.client.put_object()
+            .bucket(&s3.bucket)
+            .key(file_id.to_string())
+            .content_type("application/mp3")
+            .body(stream)
+            .send()
+            .await{
+                Ok(_) => true,
+                Err(_) => false,
+            };
+        if !upload_ok{ //TODO
+            return Err("failed to upload to S3. Error not logged");
+        }
+    }
+    return Ok(());
+}
+
+/// check that channel exists in db and on linode. - d
 async fn channel_exists(ch_id: &Uuid, pg_conn_pool: &web::Data<PgPool>
 )-> bool{
     match sqlx::query!(

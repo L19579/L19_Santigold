@@ -7,3 +7,4 @@
 /real_init_test_db.sh
 /real_configuration.toml
 /.env
+/temp

@@ -6,6 +6,7 @@ pub use {
     tracing,
     uuid::Uuid,
     actix_cors::Cors,
+    actix_multipart::Multipart,
     aws_credential_types::Credentials,
     sqlx::{
         Connection, PgPool,
@@ -20,7 +21,10 @@ pub use {
     aws_sdk_s3::{
         model::ObjectCannedAcl,
         presigning::config::PresigningConfig,
-        Client as S3Client, Config, Region,
+        Client as S3Client, Config, Region, 
+        types::{
+            ByteStream, AggregatedBytes, 
+        },
     },
     aws_smithy_http::{
         body::SdkBody
@@ -63,7 +67,8 @@ pub fn run(listener: TcpListener, db_conn_pool: PgPool, s3_client: S3)
             .route("/health_check_xml_extended", web::get().to(health_check_xml_extended))
             .route("/health_check_xml_extended_post", web::post().to(health_check_xml_extended_post))
             .route("/feed", web::get().to(feed))
-            .route("/upload", web::post().to(upload))
+            .route("/upload_object", web::post().to(upload_object))
+            .route("/upload_form", web::post().to(upload_form))
             .app_data(json_config.clone())
             .app_data(db_conn_pool.clone())
             .app_data(s3_client.clone())
