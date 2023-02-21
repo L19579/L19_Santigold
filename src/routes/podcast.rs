@@ -67,12 +67,13 @@ pub struct Channel{
     pub last_build_date: String,
     pub pub_date: String,
     pub c_link: String,
-    pub itunes_new_feed_url: Option<String>,
-    pub itunes_explicit: Option<bool>,
-    pub itunes_owner_name: Option<String>,
-    pub itunes_owner_email: Option<String>,
-    pub sy_update_period: Option<String>,
-    pub sy_update_frequency: Option<String>,
+    // optional
+    pub itunes_new_feed_url: String,
+    pub itunes_explicit: bool,
+    pub itunes_owner_name: String,
+    pub itunes_owner_email: String,
+    pub sy_update_period: String,
+    pub sy_update_frequency: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -88,9 +89,10 @@ pub struct Item{
     pub enclosure: String,
     pub i_link: String,
     pub pub_date: String,
-    pub itunes_subtitle: Option<String>,
-    pub itunes_image: Option<String>,
-    pub itunes_duration: Option<String>,
+    //optional
+    pub itunes_subtitle: String,
+    pub itunes_image: String,
+    pub itunes_duration: String,
 }
 
 #[derive(Serialize, Deserialize, Clone,Debug)]
@@ -108,21 +110,30 @@ pub struct S3{
 
 #[derive(Serialize, Deserialize, Clone,Debug)]
 pub struct XmlRequestForm{
-    pub internal_id: i32,
+    pub external_id: String,
 }
 
 #[derive(Serialize, Deserialize, Clone,Debug)]
 pub struct Xml{
-    pub ids: Vec<i32>,
+    pub external_ids: Vec<String>,
     pub titles: Vec<String>,
     pub buffers: Vec<String>
 }
 
 impl Xml {
-    pub fn get_vec_pos(&self, requested_id: i32) -> Option<usize> {
-        for (id, i) in self.ids.iter().enumerate() {
-            if requested_id == id as i32{
-                return Some(*i as usize);
+    pub fn initialize() -> Self{
+        //TODO --- THIS IS A STAND IN
+        Xml{
+            external_ids: vec![String::new()],
+            titles: vec!["Test Podcast Name".to_string()],
+            buffers: Vec::new(),
+        }
+    } 
+
+    pub fn get_vec_pos(&self, requested_id: &str) -> Option<usize> {
+        for (i, id) in self.external_ids.iter().enumerate() {
+            if requested_id == id{
+                return Some(i);
             }
         }
         return None;
@@ -135,13 +146,12 @@ pub async fn feed(
     xml: web::Data<Arc<RwLock<Xml>>>
 ) -> HttpResponse{
     let xml = xml.read().unwrap();
-    for id in xml.ids.iter(){ // TODO: update with get_vec_pos()
-        if form.internal_id == *id{
-            return HttpResponse::Ok()
-                .content_type(ContentType::xml())
-                .body(xml.buffers[*id as usize].clone())
-        }
+    if let Some(i) = xml.get_vec_pos(&form.external_id){
+        return HttpResponse::Ok()
+            .content_type(ContentType::xml())
+            .body(xml.buffers[i].clone())
     }
+
     return HttpResponse::BadRequest()
         .content_type(ContentType::plaintext())
         .body("invalid xml request");
@@ -165,7 +175,7 @@ pub async fn channels(pg_conn_pool: web::Data<PgPool>) -> HttpResponse{
     }
 
     let mut response_ser_json = String::new();
-    channels.into_iter().for_each(|c|{ // TODO: NOT ideal.
+    channels.into_iter().for_each(|c|{ 
         let ch = Channel {
             id: c.id,
             external_id: c.external_id.to_string(),
@@ -183,21 +193,17 @@ pub async fn channels(pg_conn_pool: web::Data<PgPool>) -> HttpResponse{
             last_build_date: c.last_build_date,
             pub_date: c.pub_date,
             c_link: c.c_link,
-            itunes_new_feed_url: Some(c.itunes_new_feed_url),
-            itunes_explicit: Some(c.itunes_explicit),
-            itunes_owner_name: Some(c.itunes_owner_name),
-            itunes_owner_email: Some(c.itunes_owner_email),
-            sy_update_period: Some(c.sy_update_period),
-            sy_update_frequency: Some(c.sy_update_frequency),
+            itunes_new_feed_url: c.itunes_new_feed_url,
+            itunes_explicit: c.itunes_explicit,
+            itunes_owner_name: c.itunes_owner_name,
+            itunes_owner_email: c.itunes_owner_email,
+            sy_update_period: c.sy_update_period,
+            sy_update_frequency: c.sy_update_frequency,
         
         };
             
-        let serialized_c = serde_json::ser::to_string(&ch).unwrap(); // TODO - error handling;
+        let serialized_c = serde_json::ser::to_string(&ch).unwrap();
         response_ser_json.push_str(&serialized_c);
-        /* 
-        let serialized_c = serde_json::ser::to_string(&c).unwrap(); // TODO - error handling;
-        response_ser_json.push_str(&serialized_c);
-        */
     });
 
     if response_ser_json.len() > 1 {
@@ -216,7 +222,7 @@ pub async fn episode(
 ) -> HttpResponse{
     let res = match sqlx::query!(
         r#"SELECT * FROM item WHERE id = $1"#,
-        Uuid::parse_str(&episode.into_inner().id).unwrap() // TODO: error caused by UUID ser issue
+        Uuid::parse_str(&episode.into_inner().id).unwrap()
     ).fetch_optional(pg_conn_pool.get_ref())
     .await
     .unwrap(){
@@ -242,9 +248,9 @@ pub async fn episode(
         enclosure: res.enclosure,
         i_link: res.i_link,
         pub_date: res.pub_date,
-        itunes_subtitle: Some(res.itunes_subtitle),
-        itunes_image: Some(res.itunes_image),
-        itunes_duration: Some(res.itunes_duration), // TODO: correct, we won't always expect this to be filled.
+        itunes_subtitle: res.itunes_subtitle,
+        itunes_image: res.itunes_image,
+        itunes_duration: res.itunes_duration,
     };
 
     let response_ser_json = serde_json::ser::to_string(&ep).unwrap(); 
@@ -278,8 +284,8 @@ pub async fn edit_episode(
         content_encoded = $6, enclosure = $7, i_link = $8, pub_date = $9, itunes_subtitle = $10,
         itunes_image = $11, itunes_duration = $12 WHERE id = $13
         "#, Uuid::parse_str(&ep.channel_id).unwrap(), ep.ep_number, ep.author, ep.category, ep.description,
-        ep.content_encoded, ep.enclosure, ep.i_link, ep.pub_date, ep.itunes_subtitle.unwrap_or(none()),
-        ep.itunes_image.unwrap_or(none()), ep.itunes_duration.unwrap_or(none()),
+        ep.content_encoded, ep.enclosure, ep.i_link, ep.pub_date, ep.itunes_subtitle,
+        ep.itunes_image, ep.itunes_duration,
         Uuid::parse_str(&ep.id).unwrap()
     ).execute(pg_conn_pool.get_ref()).await{
         Ok(_) => HttpResponse::Ok().finish(),
@@ -310,10 +316,10 @@ pub async fn edit_channel(
             sy_update_period = $19, sy_update_frequency = $20 WHERE external_id = $21
         "#, ch.title, ch.category, ch.description, ch.managing_editor, ch.generator, 
         ch.image_url, ch.image_title, ch.image_link, ch.image_width, ch.image_height,
-        ch.language, ch.last_build_date, ch.pub_date, ch.c_link, ch.itunes_new_feed_url.unwrap_or(none()),
-        ch.itunes_explicit.unwrap_or(false), ch.itunes_owner_name.unwrap_or(none()), 
-        ch.itunes_owner_email.unwrap_or(none()), ch.sy_update_period.unwrap_or(none()),
-        ch.sy_update_frequency.unwrap_or(none()), Uuid::parse_str(&ch.external_id).unwrap()
+        ch.language, ch.last_build_date, ch.pub_date, ch.c_link, ch.itunes_new_feed_url,
+        ch.itunes_explicit, ch.itunes_owner_name, 
+        ch.itunes_owner_email, ch.sy_update_period,
+        ch.sy_update_frequency, Uuid::parse_str(&ch.external_id).unwrap()
     ).execute(pg_conn_pool.get_ref()).await{
         Ok(_) => HttpResponse::Ok().finish(),
         Err(_) => HttpResponse::InternalServerError()
@@ -373,16 +379,18 @@ pub async fn upload_form(
     });
 
     //TODO: This check threw an unexpected during test.
+    /*
     if potential_bad_ep_uploads.len() != 0 {
         return HttpResponse::BadRequest()
             .content_type(ContentType::plaintext())
             .body(format!("wrong channel_id's for episodes: \n{}", potential_bad_ep_uploads));
     }
+    */
 
     upload_to_s3_bucket(&podcast_data.item_ids(), &s3).await.unwrap();
     store_to_db(podcast_data, &pg_conn_pool).await.unwrap();
-    let ch_id = podcast_data.channel.id;
-    let xml_pos = match xmls.read().unwrap().get_vec_pos(ch_id){
+    let ch_external_id = podcast_data.channel.external_id.clone();
+    let xml_pos = match xmls.read().unwrap().get_vec_pos(&ch_external_id){
         Some(pos) => pos,
         None => {
             return HttpResponse::InternalServerError()
@@ -391,8 +399,8 @@ pub async fn upload_form(
         },
     };
     let mut xmls = xmls.write().unwrap();
-    // Can improve. 
-    xmls.buffers[xml_pos] = refresh_xml_buffer(ch_id, &pg_conn_pool).await.unwrap();
+    // TODO: Can improve. 
+    xmls.buffers[xml_pos] = refresh_xml_buffer(&ch_external_id, &pg_conn_pool).await.unwrap();
     HttpResponse::Ok()
         .content_type(ContentType::plaintext())
         .body("upload complete")
@@ -417,7 +425,7 @@ async fn upload_to_s3_bucket(file_ids: &[impl Display], s3: &web::Data<S3>) -> R
                 Ok(_) => true,
                 Err(_) => false,
             };
-        if !upload_ok{ //TODO
+        if !upload_ok{
             return Err("failed to upload to S3. Error not logged");
         }
     }
@@ -431,7 +439,7 @@ async fn channel_exists(ch_id: &Uuid, pg_conn_pool: &web::Data<PgPool>
         r#" SELECT id FROM channel WHERE external_id = $1 "#, ch_id
     ).fetch_optional(pg_conn_pool.get_ref())
         .await
-        .unwrap(){ // TODO: unwrap
+        .unwrap(){
             Some(_) => true,
             None => false,
     }
@@ -489,9 +497,9 @@ async fn store_to_db(
             "#, Uuid::parse_str(&ch.external_id).unwrap(), ch.title, ch.category, ch.description, 
             ch.managing_editor, ch.generator, ch.image_url, ch.image_title, ch.image_link, ch.image_width, 
             ch.image_height, ch.language,ch.last_build_date, ch.pub_date, ch.c_link, 
-            ch.itunes_new_feed_url.unwrap_or(none()), ch.itunes_explicit.unwrap_or(false), 
-            ch.itunes_owner_name.unwrap_or(none()), ch.itunes_owner_email.unwrap_or(none()), 
-            ch.sy_update_period.unwrap_or(none()), ch.sy_update_frequency.unwrap_or(none())
+            ch.itunes_new_feed_url, ch.itunes_explicit, 
+            ch.itunes_owner_name, ch.itunes_owner_email, 
+            ch.sy_update_period, ch.sy_update_frequency
         ).execute(pg_conn_pool.get_ref())
         .await;
     }
@@ -503,8 +511,8 @@ async fn store_to_db(
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             "#, Uuid::parse_str(&ep.id).unwrap(), Uuid::parse_str(&ep.channel_id).unwrap(), ep.ep_number, ep.title, 
             ep.author, ep.category, ep.description, ep.content_encoded, ep.enclosure, ep.i_link, ep.pub_date, 
-            ep.itunes_subtitle.clone().unwrap_or(none()), ep.itunes_image.clone().unwrap_or(none()), 
-            ep.itunes_duration.clone().unwrap_or(none()),
+            ep.itunes_subtitle.clone(), ep.itunes_image.clone(), 
+            ep.itunes_duration.clone(),
         ).execute(pg_conn_pool.get_ref())
         .await;
     };
@@ -514,21 +522,152 @@ async fn store_to_db(
 
 /// refresh xml with updated db data
 async fn refresh_xml_buffer(
-    channel_id: i32,
+    ch_external_id: &str,
     pg_conn_pool: &web::Data<PgPool>,
 ) -> Result<String, &'static str>{
-    
+    let ch_external_id = Uuid::parse_str(ch_external_id).unwrap();
     let channel = match sqlx::query!(
-        r#"SELECT * FROM WHERE id = $1"#,   
-        form.internal_id,
+        r#" SELECT * FROM channel WHERE external_id = $1 "#,   
+        ch_external_id,
     ).fetch_optional(pg_conn_pool.get_ref())
     .await
     .unwrap(){
         Some(ch) => ch,       
         None => {
-            
+            return Err("couldn't find channel in DB");
         }
     };
-     
-    todo!()
+    let items_res: Vec<_> = match sqlx::query!(
+        r#"SELECT * FROM item WHERE channel_id = $1"#,
+        ch_external_id,
+        ).fetch_all(pg_conn_pool.get_ref())
+        .await{
+            Ok(items) => items,
+            Err(_) => Vec::new(),
+        };
+    let mut current_ep_num = 1;
+    let mut items = Vec::<Item>::new();
+    while !(&items_res.is_empty()) {
+        for item_res in &items_res{
+            if item_res.ep_number == current_ep_num {
+                let (itunes_subtitle, itunes_image, itunes_duration) = 
+                    if item_res.itunes_duration == "NONE" || item_res.itunes_duration.len() < 2 {
+                        ("", "", "")
+                    } else {
+                        (item_res.itunes_subtitle.as_str(), 
+                         item_res.itunes_image.as_str(), 
+                         item_res.itunes_duration.as_str())
+                };
+                items.push(Item{
+                    id: item_res.id.to_string(),
+                    channel_id: item_res.channel_id.to_string(),
+                    ep_number: item_res.ep_number,
+                    title: item_res.title.clone(),
+                    author: item_res.author.clone(),
+                    category: item_res.category.clone(),
+                    description: item_res.description.clone(),
+                    content_encoded: item_res.content_encoded.clone(),
+                    enclosure: item_res.enclosure.clone(),
+                    i_link: item_res.i_link.clone(),
+                    pub_date: item_res.pub_date.clone(),
+                    itunes_subtitle: itunes_subtitle.to_string(),
+                    itunes_image: itunes_image.to_string(),
+                    itunes_duration: itunes_duration.to_string(),
+                
+                });
+            }
+        }  
+    }
+
+    /*TODO: 
+     1. Can have multiple itunes categories, can also nest.
+     2. Complete vendor setup for rawvoice tag.
+     3. drop comment tags, wellformedweb isn't a thing anymore.
+    */
+    let mut xml_buffer = format!(r#"<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"
+        xmlns:content="http://purl.org/rss/1.0/modules/content/"
+        xmlns:wfw="http://wellformedweb.org/CommentAPI/"
+        xmlns:dc="http://purl.org/dc/elements/1.1/"
+        xmlns:atom="http://www.w3.org/2005/Atom"
+        xmlns:sy="http://purl.org/rss/1.0/modules/syndication/"
+        xmlns:slash="http://purl.org/rss/1.0/modules/slash/"
+        xmlns:itunes="http://wwww.itunes.com/dtds/podcast-1.0.dtd"
+        xmlns:podcast="https://github.com/Podcastindex-org/podcast-namespace/blob/main/docs/1.0.md"
+        xmlns:rawvoice="http://www.rawvoice.com/rawvoiceRssModule/"
+        xmlns:googleplay="http://www.google.com/schemas/play-podcasts/1.0"
+    >
+    <channel>
+        <title>{}</title>
+        <managingEditor>{}</managingEditor>
+        <atom:link href="{}" rel="self" type="application/rss+xml">
+        <link>{}</link>
+        <description>{}</description>
+        <lastBuildDate>{}</lastBuildDate>
+        <language>{}</language>
+        <generator>https://github.com/L19579/L19_Santigold</generator>
+        <image>
+            <url>{}</url>
+            <title>{}</title>
+            <link>{}</link>
+            <width>{}</width>
+            <height>{}</height>
+        </image>
+        <atom:link rel="hub" href="https://pubsubhubbub.appspot.com/" />
+        <itunes:new-feed-url>{}</itunes:new-feed-url>
+        <itunes:summary>{}</itunes:summary>
+        <itunes:author>{}</itunes:author>
+        <itunes:explicit>{}</itunes:explicit>
+        <itunes:image>{}</itunes:image>
+        <itunes:owner>
+            <itunes:name>{}</itunes:name>
+            <itunes:email>{}</itunes:email>
+        </itunes:owner>
+
+        <itunes:subtitle>{}</itunes:subtitle>
+        <itunes:category text="{}"/>
+        <googleplay:category text="{}"/>
+        <sy:updatePeriod>{}</sy:updatePeriod>
+        <sy:updateFrequency>{}</sy:updateFrequency>
+        
+        <rawvoice:subscribe feed="{}" itunes="{}" spotify="{}" blubrry="{}" stitcher="{}" tunein="{}">
+        </rawvoice:subscribe>
+    "#, channel.title, channel.managing_editor, channel.c_link, channel.description, channel.last_build_date,
+    channel.language, channel.generator, channel.image_url, channel.image_title, channel.image_link,
+    channel.image_width, channel.image_height, channel.itunes_new_feed_url, channel.description,
+    channel.itunes_owner_name, channel.itunes_explicit, channel.image_link, channel.itunes_owner_name,
+    channel.itunes_owner_email, channel.description, channel.category, channel.category,
+    channel.sy_update_period, channel.sy_update_frequency, channel.itunes_new_feed_url, "", "", "", "", "");
+
+    loop {
+        let item: Item;
+        match items.pop(){
+            Some(i) => item = i,
+            None => break,
+        }
+        xml_buffer.push_str(&format!(r#"
+            <item>
+                <title>{}</title>
+                <link>{}</link>
+                <pubDate>{}</pubDate>
+                <guid>{}</guid>
+                <category><![CDATA[{}]]</category>
+                <description>{}</description>
+                <content:encoded>{}</content:encoded>
+                <enclosure url="{}" />
+                <itunes:summary>{}</itunes:summary>
+                <itunes:author>{}</itunes:author>
+                <itunes:image>{}</itunes:image>
+                <itunes:duration>{}</itunes:duration>
+            </item>
+        "#, item.title, item.i_link, item.pub_date, item.id, item.category, item.description, item.content_encoded
+        , item.enclosure, item.description, item.itunes_subtitle, item.itunes_image, item.itunes_duration)); 
+    }
+               
+    
+    xml_buffer.push_str(
+        r#"</channel>
+        </rss>"#);
+
+    return Ok(xml_buffer);
 }
