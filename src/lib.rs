@@ -49,7 +49,7 @@ pub fn run(listener: TcpListener, db_conn_pool: PgPool, s3_client: S3)
     let db_conn_pool = web::Data::new(db_conn_pool);
     let s3_client = web::Data::new(s3_client);
     let json_config = web::JsonConfig::default()
-        .limit(10096) // raise this max TODO.
+        .limit(50096) // raise this max TODO.
         .content_type(|mime| mime == mime::APPLICATION_JSON)
         .error_handler(|err, _req|{
             println!("Calling run--json_config--error");

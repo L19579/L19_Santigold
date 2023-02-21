@@ -36,7 +36,16 @@ pub fn none() -> String{
 pub struct PodcastData{
     pub channel: Channel,
     pub items: Vec<Item>,
-    pub file_ids: Vec<String>,
+}
+
+impl PodcastData {
+    pub fn item_ids(&self) -> Vec<String>{
+        let mut ids = Vec::<String>::new(); 
+        for item in &self.items{
+            ids.push(item.id.clone());
+        }
+        return ids;
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -97,12 +106,45 @@ pub struct S3{
     pub temp_dir: String,
 }
 
+#[derive(Serialize, Deserialize, Clone,Debug)]
+pub struct XmlRequestForm{
+    pub internal_id: i32,
+}
+
+#[derive(Serialize, Deserialize, Clone,Debug)]
+pub struct Xml{
+    pub ids: Vec<i32>,
+    pub titles: Vec<String>,
+    pub buffers: Vec<String>
+}
+
+impl Xml {
+    pub fn get_vec_pos(&self, requested_id: i32) -> Option<usize> {
+        for (id, i) in self.ids.iter().enumerate() {
+            if requested_id == id as i32{
+                return Some(*i as usize);
+            }
+        }
+        return None;
+    }
+}
+
 /// GET RSS feed - d
-pub async fn feed(xml_buffer: web::Data<Arc<RwLock<String>>>) -> HttpResponse{
-    let body: String = xml_buffer.read().unwrap().clone();
-    return HttpResponse::Ok()
-        .content_type(ContentType::xml())
-        .body(body)
+pub async fn feed(
+    form: web::Form<XmlRequestForm>,
+    xml: web::Data<Arc<RwLock<Xml>>>
+) -> HttpResponse{
+    let xml = xml.read().unwrap();
+    for id in xml.ids.iter(){ // TODO: update with get_vec_pos()
+        if form.internal_id == *id{
+            return HttpResponse::Ok()
+                .content_type(ContentType::xml())
+                .body(xml.buffers[*id as usize].clone())
+        }
+    }
+    return HttpResponse::BadRequest()
+        .content_type(ContentType::plaintext())
+        .body("invalid xml request");
 }
 
 /// GET channels data - d
@@ -287,7 +329,7 @@ pub async fn upload_object(mut payload: Multipart, s3: web::Data<S3>) -> HttpRes
     while let Ok(Some(mut field)) = payload.try_next().await{
         let temp_dir = s3.get_ref().temp_dir.clone();
         file_id = Uuid::new_v4().to_string();
-        let temp_file = format!("{}/{}.mp3", temp_dir, file_id);
+        let temp_file = format!("{}/{}", temp_dir, file_id);
         let mut file = web::block(move|| std::fs::File::create(temp_file))
             .await
             .unwrap().unwrap(); //review
@@ -309,18 +351,13 @@ pub async fn upload_form(
     s3: web::Data<S3>,
     podcast_data: web::Json<PodcastData>,
     pg_conn_pool: web::Data<PgPool>,
-    xml_buffer: web::Data<Arc<RwLock<String>>>
+    xmls: web::Data<Arc<RwLock<Xml>>>
 ) -> HttpResponse {
     let podcast_data = &podcast_data.into_inner();
     let ch = &podcast_data.channel;
-    if podcast_data.items.len() != podcast_data.file_ids.len(){
-        return HttpResponse::BadRequest()
-            .content_type(ContentType::plaintext())
-            .body("items.len() != file_ids.len()");
-        
-    }
-    for file_id in &podcast_data.file_ids {
-        if !Path::new(file_id).exists(){
+    for file_id in &podcast_data.item_ids() {
+        let file_path = format!("{}/{}", s3.temp_dir, file_id);
+        if !Path::new(&file_path).exists(){
             return HttpResponse::BadRequest()
                 .content_type(ContentType::plaintext())
                 .body("at least 1 file_id does not exist");
@@ -334,16 +371,31 @@ pub async fn upload_form(
                 .push_str(&format!("\n{}", ep.channel_id))
         }
     });
+
+    //TODO: This check threw an unexpected during test.
     if potential_bad_ep_uploads.len() != 0 {
         return HttpResponse::BadRequest()
             .content_type(ContentType::plaintext())
             .body(format!("wrong channel_id's for episodes: \n{}", potential_bad_ep_uploads));
     }
 
+    upload_to_s3_bucket(&podcast_data.item_ids(), &s3).await.unwrap();
     store_to_db(podcast_data, &pg_conn_pool).await.unwrap();
-    upload_to_s3_bucket(&podcast_data.file_ids, &s3).await.unwrap();
-    refresh_xml_buffer(&xml_buffer).unwrap();
-    HttpResponse::Ok().finish()
+    let ch_id = podcast_data.channel.id;
+    let xml_pos = match xmls.read().unwrap().get_vec_pos(ch_id){
+        Some(pos) => pos,
+        None => {
+            return HttpResponse::InternalServerError()
+                .content_type(ContentType::plaintext())
+                .body("could not find xml buffer");
+        },
+    };
+    let mut xmls = xmls.write().unwrap();
+    // Can improve. 
+    xmls.buffers[xml_pos] = refresh_xml_buffer(ch_id, &pg_conn_pool).await.unwrap();
+    HttpResponse::Ok()
+        .content_type(ContentType::plaintext())
+        .body("upload complete")
 }
 
 // TODO: partial upload if some succeed. CRITICAL - leaves good uploads on server if all fail.
@@ -357,7 +409,7 @@ async fn upload_to_s3_bucket(file_ids: &[impl Display], s3: &web::Data<S3>) -> R
             .unwrap();
         let upload_ok = match s3.client.put_object()
             .bucket(&s3.bucket)
-            .key(file_id.to_string())
+            .key(format!("{}.mp3", file_id))
             .content_type("application/mp3")
             .body(stream)
             .send()
@@ -461,7 +513,22 @@ async fn store_to_db(
 }
 
 /// refresh xml with updated db data
-fn refresh_xml_buffer(xml_buffer: &web::Data<Arc<RwLock<String>>>) -> Result<(), &'static str>{
+async fn refresh_xml_buffer(
+    channel_id: i32,
+    pg_conn_pool: &web::Data<PgPool>,
+) -> Result<String, &'static str>{
     
+    let channel = match sqlx::query!(
+        r#"SELECT * FROM WHERE id = $1"#,   
+        form.internal_id,
+    ).fetch_optional(pg_conn_pool.get_ref())
+    .await
+    .unwrap(){
+        Some(ch) => ch,       
+        None => {
+            
+        }
+    };
+     
     todo!()
 }
