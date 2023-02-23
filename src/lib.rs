@@ -44,7 +44,7 @@ pub use {
 
 pub fn run(listener: TcpListener, db_conn_pool: PgPool, s3_client: S3)
 -> Result::<Server, std::io::Error>{
-    let xmls = Arc::new(RwLock::new(Xml::initialize()));
+    let xmls = Arc::new(RwLock::new(Xml::initialize(db_conn_pool.clone())));
     let xmls = web::Data::new(xmls);
     let db_conn_pool = web::Data::new(db_conn_pool);
     let s3_client = web::Data::new(s3_client);
@@ -66,7 +66,7 @@ pub fn run(listener: TcpListener, db_conn_pool: PgPool, s3_client: S3)
             .route("/health_check_xml", web::get().to(health_check_xml))
             .route("/health_check_xml_extended", web::get().to(health_check_xml_extended))
             .route("/health_check_xml_extended_post", web::post().to(health_check_xml_extended_post))
-            .route("/feed", web::get().to(feed))
+            .route("/podcast/{ch_title}", web::get().to(podcast))
             .route("/upload_object", web::post().to(upload_object))
             .route("/upload_form", web::post().to(upload_form))
             .app_data(json_config.clone())

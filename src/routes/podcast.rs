@@ -4,7 +4,7 @@ use {
         web, HttpResponse,
         ContentType, S3Client,
         Multipart, ByteStream,
-        AggregatedBytes,
+        AggregatedBytes, 
     },
     serde::{
         Serialize, Deserialize,
@@ -16,6 +16,7 @@ use {
         Connection, PgPool,
         types::Uuid,
     },
+    tokio::task,
     uuid::Uuid as native_Uuid,
     std::{
         fs::File,
@@ -121,13 +122,28 @@ pub struct Xml{
 }
 
 impl Xml {
-    pub fn initialize() -> Self{
-        //TODO --- THIS IS A STAND IN
-        Xml{
-            external_ids: vec![String::new()],
-            titles: vec!["Test Podcast Name".to_string()],
+    pub fn initialize(pg_conn_pool: PgPool) -> Self{
+        let channels: Vec<_> = futures::executor::block_on(
+            sqlx::query!(r#"SELECT * FROM channel"#).fetch_all(&pg_conn_pool))
+            .unwrap();
+
+        let mut xmls = Xml{
+            external_ids: Vec::new(),
+            titles: Vec::new(),
+            //titles: vec!["Test Podcast Name".to_string()],
             buffers: Vec::new(),
+        }; 
+
+        for (i, ch) in channels.iter().enumerate() {
+            log::info!("TRACE ----------------------------------------------------------  LOOP COUNT: {}", i);
+            let external_id = ch.external_id.to_string();
+            xmls.buffers.push(futures::executor::
+                block_on(refresh_xml_buffer(&external_id, &pg_conn_pool)).unwrap());
+            xmls.external_ids.push(external_id);
+            xmls.titles.push(ch.title.clone());
         }
+
+        return xmls;
     } 
 
     pub fn get_vec_pos(&self, requested_id: &str) -> Option<usize> {
@@ -138,15 +154,28 @@ impl Xml {
         }
         return None;
     }
+
+    pub fn get_vec_pos_by_title(&self, requested_title: &str) -> Option<usize> {
+        let requested_title = requested_title.to_lowercase();
+        for (i, title) in self.titles.iter().enumerate() {
+            if requested_title == title.to_lowercase(){
+                return Some(i);
+            }
+        }
+        return None;
+    }
 }
 
 /// GET RSS feed - d
-pub async fn feed(
-    form: web::Form<XmlRequestForm>,
+pub async fn podcast(
+    /* form: web::Form<XmlRequestForm>, */
+    ch_title: web::Path<String>,
     xml: web::Data<Arc<RwLock<Xml>>>
 ) -> HttpResponse{
     let xml = xml.read().unwrap();
-    if let Some(i) = xml.get_vec_pos(&form.external_id){
+    //if let Some(i) = xml.get_vec_pos(&form.external_id){
+    let ch_title = ch_title.replace("-", " "); 
+    if let Some(i) = xml.get_vec_pos_by_title(&ch_title){
         return HttpResponse::Ok()
             .content_type(ContentType::xml())
             .body(xml.buffers[i].clone())
@@ -400,7 +429,7 @@ pub async fn upload_form(
     };
     let mut xmls = xmls.write().unwrap();
     // TODO: Can improve. 
-    xmls.buffers[xml_pos] = refresh_xml_buffer(&ch_external_id, &pg_conn_pool).await.unwrap();
+    xmls.buffers[xml_pos] = refresh_xml_buffer(&ch_external_id, pg_conn_pool.get_ref()).await.unwrap();
     HttpResponse::Ok()
         .content_type(ContentType::plaintext())
         .body("upload complete")
@@ -523,13 +552,14 @@ async fn store_to_db(
 /// refresh xml with updated db data
 async fn refresh_xml_buffer(
     ch_external_id: &str,
-    pg_conn_pool: &web::Data<PgPool>,
+    pg_conn_pool: &PgPool,
 ) -> Result<String, &'static str>{
     let ch_external_id = Uuid::parse_str(ch_external_id).unwrap();
+    log::info!("TRACE ----------------------------------------------------------  1");
     let channel = match sqlx::query!(
         r#" SELECT * FROM channel WHERE external_id = $1 "#,   
         ch_external_id,
-    ).fetch_optional(pg_conn_pool.get_ref())
+    ).fetch_optional(pg_conn_pool)
     .await
     .unwrap(){
         Some(ch) => ch,       
@@ -537,19 +567,23 @@ async fn refresh_xml_buffer(
             return Err("couldn't find channel in DB");
         }
     };
+    log::info!("TRACE ----------------------------------------------------------  2");
     let items_res: Vec<_> = match sqlx::query!(
         r#"SELECT * FROM item WHERE channel_id = $1"#,
         ch_external_id,
-        ).fetch_all(pg_conn_pool.get_ref())
+        ).fetch_all(pg_conn_pool)
         .await{
             Ok(items) => items,
             Err(_) => Vec::new(),
         };
-    let mut current_ep_num = 1;
+    log::info!("TRACE ----------------------------------------------------------  3");
+    let mut current_ep_num = 1; // Used to for chronological output to xml
     let mut items = Vec::<Item>::new();
-    while !(&items_res.is_empty()) {
+    //while !(&items_res.is_empty()) {
+    for i in 0..3{
         for item_res in &items_res{
-            if item_res.ep_number == current_ep_num {
+            //if item_res.ep_number == current_ep_num {
+            if 1 == 1 {
                 let (itunes_subtitle, itunes_image, itunes_duration) = 
                     if item_res.itunes_duration == "NONE" || item_res.itunes_duration.len() < 2 {
                         ("", "", "")
@@ -576,9 +610,14 @@ async fn refresh_xml_buffer(
                 
                 });
             }
+
+            current_ep_num += 1;
+            //TEMP
+            break;
         }  
     }
 
+    log::info!("TRACE ----------------------------------------------------------  4");
     /*TODO: 
      1. Can have multiple itunes categories, can also nest.
      2. Complete vendor setup for rawvoice tag.
@@ -600,7 +639,7 @@ async fn refresh_xml_buffer(
     <channel>
         <title>{}</title>
         <managingEditor>{}</managingEditor>
-        <atom:link href="{}" rel="self" type="application/rss+xml">
+        <atom:link href="{}" rel="self" type="application/rss+xml" />
         <link>{}</link>
         <description>{}</description>
         <lastBuildDate>{}</lastBuildDate>
@@ -639,6 +678,7 @@ async fn refresh_xml_buffer(
     channel.itunes_owner_email, channel.description, channel.category, channel.category,
     channel.sy_update_period, channel.sy_update_frequency, channel.itunes_new_feed_url, "", "", "", "", "");
 
+    log::info!("TRACE ----------------------------------------------------------  5");
     loop {
         let item: Item;
         match items.pop(){
@@ -651,7 +691,7 @@ async fn refresh_xml_buffer(
                 <link>{}</link>
                 <pubDate>{}</pubDate>
                 <guid>{}</guid>
-                <category><![CDATA[{}]]</category>
+                <category><![CDATA[{}]]></category>
                 <description>{}</description>
                 <content:encoded>{}</content:encoded>
                 <enclosure url="{}" />
@@ -665,9 +705,11 @@ async fn refresh_xml_buffer(
     }
                
     
+    log::info!("TRACE ----------------------------------------------------------  6");
     xml_buffer.push_str(
         r#"</channel>
         </rss>"#);
 
+    log::info!("TRACE ----------------------------------------------------------  END");
     return Ok(xml_buffer);
 }

@@ -32,7 +32,7 @@ async fn main() -> std::io::Result<()> {
         temp_dir: config.temp_dir,
     };
 
-    let address = format!("127.0.0.1:{}", config.application_port);
+    let address = format!("0.0.0.0:{}", config.application_port);
     log::info!("Starting server! Listening at: {}", address);
     let listener = std::net::TcpListener::bind(address)?; 
     return run(listener, db_conn_pool, s3)?.await;

@@ -6,5 +6,6 @@
 /real_init_db.sh
 /real_init_test_db.sh
 /real_configuration.toml
+/real_remote_init_test_db.sh
 /.env
 /temp
