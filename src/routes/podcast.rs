@@ -4,7 +4,6 @@ use {
         web, HttpResponse,
         ContentType, S3Client,
         Multipart, ByteStream,
-        AggregatedBytes, 
     },
     serde::{
         Serialize, Deserialize,
@@ -13,14 +12,9 @@ use {
         StreamExt, TryStreamExt,
     },
     sqlx::{
-        Connection, PgPool,
-        types::Uuid,
+        PgPool, types::Uuid,
     },
-    tokio::task,
-    uuid::Uuid as native_Uuid,
     std::{
-        fs::File,
-        time::Duration,
         result::Result,
         io::Write,
         path::Path,
@@ -135,7 +129,6 @@ impl Xml {
         }; 
 
         for (i, ch) in channels.iter().enumerate() {
-            log::info!("TRACE ----------------------------------------------------------  LOOP COUNT: {}", i);
             let external_id = ch.external_id.to_string();
             xmls.buffers.push(futures::executor::
                 block_on(refresh_xml_buffer(&external_id, &pg_conn_pool)).unwrap());
@@ -543,7 +536,8 @@ async fn store_to_db(
             ep.itunes_subtitle.clone(), ep.itunes_image.clone(), 
             ep.itunes_duration.clone(),
         ).execute(pg_conn_pool.get_ref())
-        .await;
+        .await
+        .unwrap();
     };
 
     return Ok(());
@@ -555,7 +549,6 @@ async fn refresh_xml_buffer(
     pg_conn_pool: &PgPool,
 ) -> Result<String, &'static str>{
     let ch_external_id = Uuid::parse_str(ch_external_id).unwrap();
-    log::info!("TRACE ----------------------------------------------------------  1");
     let channel = match sqlx::query!(
         r#" SELECT * FROM channel WHERE external_id = $1 "#,   
         ch_external_id,
@@ -567,7 +560,6 @@ async fn refresh_xml_buffer(
             return Err("couldn't find channel in DB");
         }
     };
-    log::info!("TRACE ----------------------------------------------------------  2");
     let items_res: Vec<_> = match sqlx::query!(
         r#"SELECT * FROM item WHERE channel_id = $1"#,
         ch_external_id,
@@ -576,48 +568,44 @@ async fn refresh_xml_buffer(
             Ok(items) => items,
             Err(_) => Vec::new(),
         };
-    log::info!("TRACE ----------------------------------------------------------  3");
-    let mut current_ep_num = 1; // Used to for chronological output to xml
+    // Used to for chronological output to xml
+    // Rethinking immediate need for this atm. Postgres stays chronological.
+    //let mut current_ep_num = 1; 
     let mut items = Vec::<Item>::new();
     //while !(&items_res.is_empty()) {
-    for i in 0..3{
-        for item_res in &items_res{
-            //if item_res.ep_number == current_ep_num {
-            if 1 == 1 {
-                let (itunes_subtitle, itunes_image, itunes_duration) = 
-                    if item_res.itunes_duration == "NONE" || item_res.itunes_duration.len() < 2 {
-                        ("", "", "")
-                    } else {
-                        (item_res.itunes_subtitle.as_str(), 
-                         item_res.itunes_image.as_str(), 
-                         item_res.itunes_duration.as_str())
-                };
-                items.push(Item{
-                    id: item_res.id.to_string(),
-                    channel_id: item_res.channel_id.to_string(),
-                    ep_number: item_res.ep_number,
-                    title: item_res.title.clone(),
-                    author: item_res.author.clone(),
-                    category: item_res.category.clone(),
-                    description: item_res.description.clone(),
-                    content_encoded: item_res.content_encoded.clone(),
-                    enclosure: item_res.enclosure.clone(),
-                    i_link: item_res.i_link.clone(),
-                    pub_date: item_res.pub_date.clone(),
-                    itunes_subtitle: itunes_subtitle.to_string(),
-                    itunes_image: itunes_image.to_string(),
-                    itunes_duration: itunes_duration.to_string(),
-                
-                });
-            }
+    for item_res in &items_res{
+        //if item_res.ep_number == current_ep_num {
+        if 1 == 1 {
+            let (itunes_subtitle, itunes_image, itunes_duration) = 
+                if item_res.itunes_duration == "NONE" || item_res.itunes_duration.len() < 2 {
+                    ("", "", "")
+                } else {
+                    (item_res.itunes_subtitle.as_str(), 
+                     item_res.itunes_image.as_str(), 
+                     item_res.itunes_duration.as_str())
+            };
+            items.push(Item{
+                id: item_res.id.to_string(),
+                channel_id: item_res.channel_id.to_string(),
+                ep_number: item_res.ep_number,
+                title: item_res.title.clone(),
+                author: item_res.author.clone(),
+                category: item_res.category.clone(),
+                description: item_res.description.clone(),
+                content_encoded: item_res.content_encoded.clone(),
+                enclosure: item_res.enclosure.clone(),
+                i_link: item_res.i_link.clone(),
+                pub_date: item_res.pub_date.clone(),
+                itunes_subtitle: itunes_subtitle.to_string(),
+                itunes_image: itunes_image.to_string(),
+                itunes_duration: itunes_duration.to_string(),
+            
+            });
+        }
 
-            current_ep_num += 1;
-            //TEMP
-            break;
-        }  
-    }
+        //current_ep_num += 1;
+    }  
 
-    log::info!("TRACE ----------------------------------------------------------  4");
     /*TODO: 
      1. Can have multiple itunes categories, can also nest.
      2. Complete vendor setup for rawvoice tag.
@@ -679,6 +667,9 @@ async fn refresh_xml_buffer(
     channel.sy_update_period, channel.sy_update_frequency, channel.itunes_new_feed_url, "", "", "", "", "");
 
     log::info!("TRACE ----------------------------------------------------------  5");
+    for item in &items{
+        log::info!("TRACE -- ID -------------- {}", &item.id);
+    } 
     loop {
         let item: Item;
         match items.pop(){
@@ -704,12 +695,9 @@ async fn refresh_xml_buffer(
         , item.enclosure, item.description, item.itunes_subtitle, item.itunes_image, item.itunes_duration)); 
     }
                
-    
-    log::info!("TRACE ----------------------------------------------------------  6");
     xml_buffer.push_str(
         r#"</channel>
         </rss>"#);
 
-    log::info!("TRACE ----------------------------------------------------------  END");
     return Ok(xml_buffer);
 }
