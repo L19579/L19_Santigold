@@ -24,11 +24,12 @@ async fn main() -> std::io::Result<()> {
     let s3_conf = Config::builder()
        .credentials_provider(s3_credentials)
        .endpoint_url(&s3_config.endpoint_url)
-       .region(Region::new(s3_config.region))
+       .region(Region::new(s3_config.region.to_string()))
        .build();
     let s3 = S3{
         client: S3Client::from_conf(s3_conf),
-        bucket: s3_config.bucket,
+        bucket: s3_config.bucket.to_string(),
+        full_link: s3_config.full_link(),
         temp_dir: config.temp_dir,
     };
 

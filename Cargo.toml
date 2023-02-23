@@ -29,7 +29,7 @@ version = "*"
 features = ["v4"]
 
 [dependencies.sqlx]
-version = "*"
+version = "0.6.2"
 deafault-features = false
 features = [
   "runtime-actix-rustls",

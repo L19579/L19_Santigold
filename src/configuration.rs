@@ -52,3 +52,11 @@ pub struct S3Bucket{
     pub access_key: String,
     pub secret_access_key: String,
 }
+
+impl S3Bucket{
+    pub fn full_link(&self) -> String{
+        let mut link = self.endpoint_url.clone().to_lowercase();
+        link = link.replace("https://", &format!("https://{}.", self.bucket)); 
+        return link;
+    }
+}

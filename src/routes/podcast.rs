@@ -4,6 +4,7 @@ use {
         web, HttpResponse,
         ContentType, S3Client,
         Multipart, ByteStream,
+        ObjectCannedAcl,
     },
     serde::{
         Serialize, Deserialize,
@@ -100,6 +101,7 @@ pub struct ItemAbbreviated{
 pub struct S3{
     pub client: S3Client,
     pub bucket: String,
+    pub full_link: String,
     pub temp_dir: String,
 }
 
@@ -128,14 +130,15 @@ impl Xml {
             buffers: Vec::new(),
         }; 
 
-        for (i, ch) in channels.iter().enumerate() {
+        for ch in channels.iter() {
             let external_id = ch.external_id.to_string();
+            log::info!("TRACE -------------------------------- TOP LOOP - ch ID: {}", &external_id);
             xmls.buffers.push(futures::executor::
                 block_on(refresh_xml_buffer(&external_id, &pg_conn_pool)).unwrap());
             xmls.external_ids.push(external_id);
             xmls.titles.push(ch.title.clone());
         }
-
+        log::info!("TRACE -------------------------------- TOP LOOP - END");
         return xmls;
     } 
 
@@ -381,7 +384,7 @@ pub async fn upload_form(
     pg_conn_pool: web::Data<PgPool>,
     xmls: web::Data<Arc<RwLock<Xml>>>
 ) -> HttpResponse {
-    let podcast_data = &podcast_data.into_inner();
+    let podcast_data = &mut podcast_data.into_inner();
     let ch = &podcast_data.channel;
     for file_id in &podcast_data.item_ids() {
         let file_path = format!("{}/{}", s3.temp_dir, file_id);
@@ -391,13 +394,14 @@ pub async fn upload_form(
                 .body("at least 1 file_id does not exist");
         } 
     }
-    let eps: &[Item] = &podcast_data.items;
+    let eps: &mut [Item] = &mut podcast_data.items;
     let mut potential_bad_ep_uploads = String::new();
-    eps.iter().for_each(|ep|{
+    eps.into_iter().for_each(|ep|{
         if !(ch.external_id != ep.channel_id){
             potential_bad_ep_uploads
                 .push_str(&format!("\n{}", ep.channel_id))
         }
+        ep.enclosure = format!("{}/{}.mp3", &s3.full_link, &ep.id);
     });
 
     //TODO: This check threw an unexpected during test.
@@ -440,6 +444,7 @@ async fn upload_to_s3_bucket(file_ids: &[impl Display], s3: &web::Data<S3>) -> R
         let upload_ok = match s3.client.put_object()
             .bucket(&s3.bucket)
             .key(format!("{}.mp3", file_id))
+            .acl(ObjectCannedAcl::PublicRead)
             .content_type("application/mp3")
             .body(stream)
             .send()
@@ -523,7 +528,8 @@ async fn store_to_db(
             ch.itunes_owner_name, ch.itunes_owner_email, 
             ch.sy_update_period, ch.sy_update_frequency
         ).execute(pg_conn_pool.get_ref())
-        .await;
+        .await
+        .unwrap();
     }
    
     for ep in eps{ // messy
@@ -548,8 +554,11 @@ async fn refresh_xml_buffer(
     ch_external_id: &str,
     pg_conn_pool: &PgPool,
 ) -> Result<String, &'static str>{
+    log::info!("TRACE ----------------------------------------------------------  0");
     let ch_external_id = Uuid::parse_str(ch_external_id).unwrap();
-    let channel = match sqlx::query!(
+
+    log::info!("TRACE ----------------------------------------------------------  1");
+    let ch = match sqlx::query!(
         r#" SELECT * FROM channel WHERE external_id = $1 "#,   
         ch_external_id,
     ).fetch_optional(pg_conn_pool)
@@ -560,21 +569,53 @@ async fn refresh_xml_buffer(
             return Err("couldn't find channel in DB");
         }
     };
-    let items_res: Vec<_> = match sqlx::query!(
+
+    // -----------------------------------------------------------------
+    let channel = Channel {
+        id: ch.id,
+        external_id: ch.external_id.to_string(),
+        title: ch.title,
+        category: ch.category,
+        description: ch.description,
+        managing_editor: ch.managing_editor,
+        generator: ch.generator,
+        image_url: ch.image_url,
+        image_title : ch.image_title,
+        image_link: ch.image_link,
+        image_width : ch.image_width,
+        image_height: ch.image_height,
+        language: ch.language,
+        last_build_date: ch.last_build_date,
+        pub_date: ch.pub_date,
+        c_link: ch.c_link,
+        itunes_new_feed_url: ch.itunes_new_feed_url,
+        itunes_explicit: ch.itunes_explicit,
+        itunes_owner_name: ch.itunes_owner_name,
+        itunes_owner_email: ch.itunes_owner_email,
+        sy_update_period: ch.sy_update_period,
+        sy_update_frequency: ch.sy_update_frequency,
+    };
+    // -----------------------------------------------------------------
+
+    log::info!("TRACE ----------------------------------------------------------  2");
+    let items_res: Vec<_> = sqlx::query!(
         r#"SELECT * FROM item WHERE channel_id = $1"#,
         ch_external_id,
         ).fetch_all(pg_conn_pool)
-        .await{
+        .await.unwrap();
+       /* 
+        {
             Ok(items) => items,
             Err(_) => Vec::new(),
         };
+        */
+    log::info!("TRACE ----------------------------------------------------------  3");
+    // ------------------------------------------------------------------------ TODO: error here.
     // Used to for chronological output to xml
     // Rethinking immediate need for this atm. Postgres stays chronological.
     //let mut current_ep_num = 1; 
     let mut items = Vec::<Item>::new();
-    //while !(&items_res.is_empty()) {
     for item_res in &items_res{
-        //if item_res.ep_number == current_ep_num {
         if 1 == 1 {
             let (itunes_subtitle, itunes_image, itunes_duration) = 
                 if item_res.itunes_duration == "NONE" || item_res.itunes_duration.len() < 2 {
@@ -602,9 +643,9 @@ async fn refresh_xml_buffer(
             
             });
         }
-
         //current_ep_num += 1;
     }  
+    log::info!("TRACE ----------------------------------------------------------  4");
 
     /*TODO: 
      1. Can have multiple itunes categories, can also nest.
