@@ -4,7 +4,8 @@ use {
         web, HttpResponse,
         ContentType, S3Client,
         Multipart, ByteStream,
-        ObjectCannedAcl,
+        ObjectCannedAcl, ActiveTokens,
+        is_valid_token, 
     },
     serde::{
         Serialize, Deserialize,
@@ -32,6 +33,7 @@ pub fn none() -> String{
 pub struct PodcastData{
     pub channel: Channel,
     pub items: Vec<Item>,
+    pub session_token: String,
 }
 
 impl PodcastData {
@@ -119,17 +121,19 @@ pub struct Xml{
 
 impl Xml {
     pub fn initialize(pg_conn_pool: PgPool) -> Self{
+        log::info!("TRACE -------------------------------- INITIALIZE 0");
         let channels: Vec<_> = futures::executor::block_on(
             sqlx::query!(r#"SELECT * FROM channel"#).fetch_all(&pg_conn_pool))
             .unwrap();
 
+        log::info!("TRACE -------------------------------- INITIALIZE 1");
         let mut xmls = Xml{
             external_ids: Vec::new(),
             titles: Vec::new(),
             //titles: vec!["Test Podcast Name".to_string()],
             buffers: Vec::new(),
         }; 
-
+        log::info!("TRACE -------------------------------- INITIALIZE 2");
         for ch in channels.iter() {
             let external_id = ch.external_id.to_string();
             log::info!("TRACE -------------------------------- TOP LOOP - ch ID: {}", &external_id);
@@ -138,7 +142,9 @@ impl Xml {
             xmls.external_ids.push(external_id);
             xmls.titles.push(ch.title.clone());
         }
+        std::thread::sleep(std::time::Duration::from_secs(10)); 
         log::info!("TRACE -------------------------------- TOP LOOP - END");
+        log::info!("TRACE -------------------------------- INITIALIZE END");
         return xmls;
     } 
 
@@ -278,8 +284,8 @@ pub async fn episode(
         itunes_duration: res.itunes_duration,
     };
 
-    let response_ser_json = serde_json::ser::to_string(&ep).unwrap(); 
-    let response_ser_json = format!("{{{}}}", response_ser_json);
+    let mut response_ser_json = serde_json::ser::to_string(&ep).unwrap(); 
+    response_ser_json = format!("{{{}}}", response_ser_json);
 
     return HttpResponse::Ok()
         .content_type(ContentType::json())
@@ -326,7 +332,7 @@ pub async fn edit_channel(
     pg_conn_pool: &web::Data<PgPool>,
 ) -> HttpResponse {
     let ch = updated_ch.into_inner();
-    if!(channel_exists(&Uuid::parse_str(&ch.external_id).unwrap(), &pg_conn_pool).await) {
+    if!(channel_exists(&ch.title, &pg_conn_pool).await) {
         return HttpResponse::BadRequest()
             .content_type(ContentType::plaintext())
             .body("channel does not exist");
@@ -355,6 +361,7 @@ pub async fn edit_channel(
 
 /// Post media - d 
 // TODO should integrate this with upload_form() once working example complete; + unwraps 
+// Also need some way to squeeze session token in.
 pub async fn upload_object(mut payload: Multipart, s3: web::Data<S3>) -> HttpResponse{
     let mut file_id = String::new();
     while let Ok(Some(mut field)) = payload.try_next().await{
@@ -381,9 +388,15 @@ pub async fn upload_form(
     /* episode: web::Json<Item>, */
     s3: web::Data<S3>,
     podcast_data: web::Json<PodcastData>,
+    active_tokens: web::Data<RwLock<ActiveTokens>>,
     pg_conn_pool: web::Data<PgPool>,
     xmls: web::Data<Arc<RwLock<Xml>>>
 ) -> HttpResponse {
+
+    if !is_valid_token(&podcast_data.session_token, active_tokens).await{
+        return HttpResponse::Unauthorized().finish();
+    } 
+
     let podcast_data = &mut podcast_data.into_inner();
     let ch = &podcast_data.channel;
     for file_id in &podcast_data.item_ids() {
@@ -425,7 +438,7 @@ pub async fn upload_form(
         },
     };
     let mut xmls = xmls.write().unwrap();
-    // TODO: Can improve. 
+    // TODO: Can improve ; also should be updating xml vects for new podcasts. TODO -- CRITICAL
     xmls.buffers[xml_pos] = refresh_xml_buffer(&ch_external_id, pg_conn_pool.get_ref()).await.unwrap();
     HttpResponse::Ok()
         .content_type(ContentType::plaintext())
@@ -460,10 +473,10 @@ async fn upload_to_s3_bucket(file_ids: &[impl Display], s3: &web::Data<S3>) -> R
 }
 
 /// check that channel exists in db and on linode. - d
-async fn channel_exists(ch_id: &Uuid, pg_conn_pool: &web::Data<PgPool>
+async fn channel_exists(ch_title: &str, pg_conn_pool: &web::Data<PgPool>
 )-> bool{
     match sqlx::query!(
-        r#" SELECT id FROM channel WHERE external_id = $1 "#, ch_id
+        r#" SELECT id FROM channel WHERE LOWER(title) = $1 "#, ch_title.to_lowercase()
     ).fetch_optional(pg_conn_pool.get_ref())
         .await
         .unwrap(){
@@ -513,7 +526,8 @@ async fn store_to_db(
     let ch = podcast_data.channel.clone(); // redo.
     let eps: &[Item] = &podcast_data.items;
 
-    if !(channel_exists(&Uuid::parse_str(&ch.external_id).unwrap(), &pg_conn_pool).await){
+    if !(channel_exists(&ch.title, &pg_conn_pool).await){
+        log::info!("TRACE -----------------------------  CREATING NEW CHANNEL ");
         sqlx::query!(r#"
             INSERT INTO channel (external_id, title, category, description, managing_editor,
             generator, image_url, image_title, image_link, image_width, image_height, language,
@@ -521,7 +535,7 @@ async fn store_to_db(
             itunes_owner_email, sy_update_period, sy_update_frequency)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
             $17, $18, $19, $20, $21)
-            "#, Uuid::parse_str(&ch.external_id).unwrap(), ch.title, ch.category, ch.description, 
+            "#, Uuid::new_v4(), ch.title, ch.category, ch.description, 
             ch.managing_editor, ch.generator, ch.image_url, ch.image_title, ch.image_link, ch.image_width, 
             ch.image_height, ch.language,ch.last_build_date, ch.pub_date, ch.c_link, 
             ch.itunes_new_feed_url, ch.itunes_explicit, 
@@ -564,8 +578,12 @@ async fn refresh_xml_buffer(
     ).fetch_optional(pg_conn_pool)
     .await
     .unwrap(){
-        Some(ch) => ch,       
+        Some(ch) => {
+            log::info!("TRACE ----------------------------------------------------------  1.5 - result: Some()");
+            ch
+        },       
         None => {
+            log::info!("TRACE ----------------------------------------------------------  1.5 - result: None");
             return Err("couldn't find channel in DB");
         }
     };

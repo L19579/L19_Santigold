@@ -16,6 +16,7 @@ pub fn get_configuration() -> Result<Settings, ConfigError>{
 pub struct Settings{
     pub in_production_mode: bool,
     pub application_port: String,
+    pub admin_password: String,
     pub temp_dir: String,
     pub database: DatabaseSettings,
     pub s3_bucket: S3Bucket,

@@ -2,7 +2,8 @@ use {
     L19_Santigold::{
         run, get_configuration,
         PgPool, S3, S3Client, 
-        Config, Credentials, Region,
+        Config, Credentials, 
+        Region, AdminPassword,
     },
 }; 
 
@@ -13,6 +14,8 @@ async fn main() -> std::io::Result<()> {
     
     let config = get_configuration()
         .expect("Failed to read config file");
+
+    let admin_pass = AdminPassword(config.admin_password.clone());
 
     let db_conn_pool = PgPool::connect(&config.database_connection_string())
         .await
@@ -36,5 +39,5 @@ async fn main() -> std::io::Result<()> {
     let address = format!("0.0.0.0:{}", config.application_port);
     log::info!("Starting server! Listening at: {}", address);
     let listener = std::net::TcpListener::bind(address)?; 
-    return run(listener, db_conn_pool, s3)?.await;
+    return run(listener, db_conn_pool, s3, admin_pass)?.await;
 }
