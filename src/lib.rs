@@ -47,7 +47,8 @@ pub use {
 //Refactor. // Also don't need Arc<>; web::Data does the job.
 pub fn run(listener: TcpListener, db_conn_pool: PgPool, s3_client: S3, admin_pass: AdminPassword)
 -> Result::<Server, std::io::Error>{
-    let admin_pass = web::Data::new(admin_pass);
+    let admin_pass = web::Data::new(admin_pass.clone());
+    let active_tokens = web::Data::new(RwLock::new(ActiveTokens(Vec::new())));
     log::info!("TRACE --------------------------------------- run 0");
     let xmls = Arc::new(RwLock::new(Xml::initialize(db_conn_pool.clone())));
     log::info!("TRACE --------------------------------------- run 1");
@@ -85,6 +86,7 @@ pub fn run(listener: TcpListener, db_conn_pool: PgPool, s3_client: S3, admin_pas
             .app_data(s3_client.clone())
             .app_data(xmls.clone())
             .app_data(admin_pass.clone())
+            .app_data(active_tokens.clone())
     })
     .listen(listener)?
     .run();

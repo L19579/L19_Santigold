@@ -27,7 +27,7 @@ pub async fn generate_session_token(
         active_tokens.write().unwrap().0.push(session_token.clone());
         return HttpResponse::Ok()
             .content_type(ContentType::plaintext())
-            .body(Uuid::new_v4().to_string());
+            .body(session_token);
     }
     
     return HttpResponse::Unauthorized().finish();

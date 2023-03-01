@@ -1,4 +1,4 @@
-# L19_Santigold (work in progress)
+# L19_Santigold
 
 ## Purpose: Podcast Server
 
@@ -9,6 +9,8 @@ This exists because I don't care for podcast hosting fees.
 <p align="center">
   <img src="https://raw.githubusercontent.com/L19579/L19_Santigold/main/imgs/reference_1.png">
 </p>
+
+ Example XML output: [example.l19579.xyz/podcast/podcast-rename](https://example.l19579.xyz/podcast/podcast-rename)
 
 ---
 
