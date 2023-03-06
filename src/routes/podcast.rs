@@ -121,30 +121,24 @@ pub struct Xml{
 
 impl Xml {
     pub fn initialize(pg_conn_pool: PgPool) -> Self{
-        log::info!("TRACE -------------------------------- INITIALIZE 0");
         let channels: Vec<_> = futures::executor::block_on(
             sqlx::query!(r#"SELECT * FROM channel"#).fetch_all(&pg_conn_pool))
             .unwrap();
 
-        log::info!("TRACE -------------------------------- INITIALIZE 1");
         let mut xmls = Xml{
             external_ids: Vec::new(),
             titles: Vec::new(),
             //titles: vec!["Test Podcast Name".to_string()],
             buffers: Vec::new(),
         }; 
-        log::info!("TRACE -------------------------------- INITIALIZE 2");
         for ch in channels.iter() {
             let external_id = ch.external_id.to_string();
-            log::info!("TRACE -------------------------------- TOP LOOP - ch ID: {}", &external_id);
             xmls.buffers.push(futures::executor::
                 block_on(refresh_xml_buffer(&external_id, &pg_conn_pool)).unwrap());
             xmls.external_ids.push(external_id);
             xmls.titles.push(ch.title.clone());
         }
         std::thread::sleep(std::time::Duration::from_secs(10)); 
-        log::info!("TRACE -------------------------------- TOP LOOP - END");
-        log::info!("TRACE -------------------------------- INITIALIZE END");
         return xmls;
     } 
 
@@ -568,10 +562,8 @@ async fn refresh_xml_buffer(
     ch_external_id: &str,
     pg_conn_pool: &PgPool,
 ) -> Result<String, &'static str>{
-    log::info!("TRACE ----------------------------------------------------------  0");
     let ch_external_id = Uuid::parse_str(ch_external_id).unwrap();
 
-    log::info!("TRACE ----------------------------------------------------------  1");
     let ch = match sqlx::query!(
         r#" SELECT * FROM channel WHERE external_id = $1 "#,   
         ch_external_id,
@@ -579,16 +571,13 @@ async fn refresh_xml_buffer(
     .await
     .unwrap(){
         Some(ch) => {
-            log::info!("TRACE ----------------------------------------------------------  1.5 - result: Some()");
             ch
         },       
         None => {
-            log::info!("TRACE ----------------------------------------------------------  1.5 - result: None");
             return Err("couldn't find channel in DB");
         }
     };
 
-    // -----------------------------------------------------------------
     let channel = Channel {
         id: ch.id,
         external_id: ch.external_id.to_string(),
@@ -613,9 +602,7 @@ async fn refresh_xml_buffer(
         sy_update_period: ch.sy_update_period,
         sy_update_frequency: ch.sy_update_frequency,
     };
-    // -----------------------------------------------------------------
 
-    log::info!("TRACE ----------------------------------------------------------  2");
     let items_res: Vec<_> = sqlx::query!(
         r#"SELECT * FROM item WHERE channel_id = $1"#,
         ch_external_id,
@@ -627,8 +614,6 @@ async fn refresh_xml_buffer(
             Err(_) => Vec::new(),
         };
         */
-    log::info!("TRACE ----------------------------------------------------------  3");
-    // ------------------------------------------------------------------------ TODO: error here.
     // Used to for chronological output to xml
     // Rethinking immediate need for this atm. Postgres stays chronological.
     //let mut current_ep_num = 1; 
@@ -663,14 +648,13 @@ async fn refresh_xml_buffer(
         }
         //current_ep_num += 1;
     }  
-    log::info!("TRACE ----------------------------------------------------------  4");
 
     /*TODO: 
      1. Can have multiple itunes categories, can also nest.
      2. Complete vendor setup for rawvoice tag.
      3. drop comment tags, wellformedweb isn't a thing anymore.
     */
-    let mut xml_buffer = format!(r#"<?xml version="1.0" encoding="UTF-8"?>
+   let mut xml_buffer = format!(r#"<?xml version="1.0" encoding="UTF-8"?>
     <rss version="2.0"
         xmlns:content="http://purl.org/rss/1.0/modules/content/"
         xmlns:wfw="http://wellformedweb.org/CommentAPI/"
@@ -678,7 +662,7 @@ async fn refresh_xml_buffer(
         xmlns:atom="http://www.w3.org/2005/Atom"
         xmlns:sy="http://purl.org/rss/1.0/modules/syndication/"
         xmlns:slash="http://purl.org/rss/1.0/modules/slash/"
-        xmlns:itunes="http://wwww.itunes.com/dtds/podcast-1.0.dtd"
+        xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
         xmlns:podcast="https://github.com/Podcastindex-org/podcast-namespace/blob/main/docs/1.0.md"
         xmlns:rawvoice="http://www.rawvoice.com/rawvoiceRssModule/"
         xmlns:googleplay="http://www.google.com/schemas/play-podcasts/1.0"
@@ -713,22 +697,17 @@ async fn refresh_xml_buffer(
         <itunes:subtitle>{}</itunes:subtitle>
         <itunes:category text="{}"/>
         <googleplay:category text="{}"/>
-        <sy:updatePeriod>{}</sy:updatePeriod>
-        <sy:updateFrequency>{}</sy:updateFrequency>
-        
-        <rawvoice:subscribe feed="{}" itunes="{}" spotify="{}" blubrry="{}" stitcher="{}" tunein="{}">
-        </rawvoice:subscribe>
-    "#, channel.title, channel.managing_editor, channel.c_link, channel.description, channel.last_build_date,
-    channel.language, channel.generator, channel.image_url, channel.image_title, channel.image_link,
+
+    "#, channel.title, channel.managing_editor, channel.c_link, channel.c_link, channel.description, channel.last_build_date,
+    channel.language, channel.image_url, channel.image_title, channel.image_link,
     channel.image_width, channel.image_height, channel.itunes_new_feed_url, channel.description,
     channel.itunes_owner_name, channel.itunes_explicit, channel.image_link, channel.itunes_owner_name,
     channel.itunes_owner_email, channel.description, channel.category, channel.category,
-    channel.sy_update_period, channel.sy_update_frequency, channel.itunes_new_feed_url, "", "", "", "", "");
+    /* channel.sy_update_period, channel.sy_update_frequency, channel.itunes_new_feed_url, "", "", "", "", "" */);
 
-    log::info!("TRACE ----------------------------------------------------------  5");
     for item in &items{
         log::info!("TRACE -- ID -------------- {}", &item.id);
-    } 
+    }
     loop {
         let item: Item;
         match items.pop(){
@@ -738,6 +717,7 @@ async fn refresh_xml_buffer(
         xml_buffer.push_str(&format!(r#"
             <item>
                 <title>{}</title>
+                <author>{}</author>
                 <link>{}</link>
                 <pubDate>{}</pubDate>
                 <guid>{}</guid>
@@ -746,14 +726,11 @@ async fn refresh_xml_buffer(
                 <content:encoded>{}</content:encoded>
                 <enclosure url="{}" />
                 <itunes:summary>{}</itunes:summary>
-                <itunes:author>{}</itunes:author>
-                <itunes:image>{}</itunes:image>
-                <itunes:duration>{}</itunes:duration>
             </item>
-        "#, item.title, item.i_link, item.pub_date, item.id, item.category, item.description, item.content_encoded
-        , item.enclosure, item.description, item.itunes_subtitle, item.itunes_image, item.itunes_duration)); 
+        "#, item.title, item.author, item.i_link, item.pub_date, item.id, item.category, item.description, item.content_encoded
+        , item.enclosure, item.description, /* item.itunes_duration */));
     }
-               
+ 
     xml_buffer.push_str(
         r#"</channel>
         </rss>"#);
