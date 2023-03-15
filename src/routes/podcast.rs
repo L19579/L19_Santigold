@@ -22,7 +22,7 @@ use {
         path::Path,
         fmt::Display,
     },
-    
+   
 };
 
 pub fn none() -> String{
@@ -121,25 +121,41 @@ pub struct Xml{
 
 impl Xml {
     pub fn initialize(pg_conn_pool: PgPool) -> Self{
+
         let channels: Vec<_> = futures::executor::block_on(
             sqlx::query!(r#"SELECT * FROM channel"#).fetch_all(&pg_conn_pool))
             .unwrap();
-
-        let mut xmls = Xml{
+        let xmls = Xml{
             external_ids: Vec::new(),
             titles: Vec::new(),
             //titles: vec!["Test Podcast Name".to_string()],
             buffers: Vec::new(),
         }; 
-        for ch in channels.iter() {
+        let xmls = Arc::new(RwLock::new(xmls));
+        for ch in channels.into_iter() {
             let external_id = ch.external_id.to_string();
-            xmls.buffers.push(futures::executor::
-                block_on(refresh_xml_buffer(&external_id, &pg_conn_pool)).unwrap());
-            xmls.external_ids.push(external_id);
-            xmls.titles.push(ch.title.clone());
+
+            // following block resolves issue we had w/ future that wasn't being polled to
+            // completion. Messy. REFACTOR- TODO.
+            {
+                let xmls = xmls.clone();
+                let external_id = external_id.clone();
+                let pg_conn_pool = pg_conn_pool.clone();
+                let handle = tokio::spawn( async move {
+                    let res = refresh_xml_buffer(&external_id.clone(), &pg_conn_pool.clone()).await.unwrap();
+                    xmls.write().unwrap().buffers.push(res);
+                });
+
+                std::thread::sleep(std::time::Duration::from_secs(10));
+                handle.abort();
+            }
+
+
+            xmls.write().unwrap().external_ids.push(external_id.clone().to_string()); // temp
+            xmls.write().unwrap().titles.push(ch.title.clone());
         }
         std::thread::sleep(std::time::Duration::from_secs(10)); 
-        return xmls;
+        return Arc::try_unwrap(xmls).unwrap().into_inner().unwrap();
     } 
 
     pub fn get_vec_pos(&self, requested_id: &str) -> Option<usize> {
@@ -602,7 +618,6 @@ async fn refresh_xml_buffer(
         sy_update_period: ch.sy_update_period,
         sy_update_frequency: ch.sy_update_frequency,
     };
-
     let items_res: Vec<_> = sqlx::query!(
         r#"SELECT * FROM item WHERE channel_id = $1"#,
         ch_external_id,
