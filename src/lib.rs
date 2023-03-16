@@ -18,6 +18,16 @@ pub use {
         middleware, dev::Server,
         http::header::ContentType,
     },
+    actix_multipart::{
+        form::{
+            MultipartForm,
+            MultipartCollect,
+            MultipartFormConfig,
+            json::Json as MultipartFormJson,
+            text::Text as MultipartFormText,
+            tempfile::TempFile as MultipartFormTempFile,
+        },
+    },
     aws_sdk_s3::{
         model::ObjectCannedAcl,
         presigning::config::PresigningConfig,
@@ -66,9 +76,17 @@ pub fn run(listener: TcpListener, db_conn_pool: PgPool, s3_client: S3, admin_pas
                 err, HttpResponse::Conflict().into()
             ).into()
         });
+    let multipart_form_config = MultipartFormConfig::default()
+        .error_handler(|err, req|{
+            log::info!("TRACE Multipart ----- Bad request. Headers: {:?}",
+                       req.headers());
+            actix_web::error::InternalError::from_response(
+                err, HttpResponse::BadRequest().into()
+            ).into()
+
+        });
     log::info!("TRACE --------------------------------------- run 4");
     let server = HttpServer::new(move ||{
-        // TODO: add logger/tracing
         App::new()
             .wrap(middleware::Logger::default())
             .wrap(Cors::permissive()) // TODO CRTITICAL: temp
@@ -80,8 +98,10 @@ pub fn run(listener: TcpListener, db_conn_pool: PgPool, s3_client: S3, admin_pas
             .route("/podcast/{ch_title}", web::get().to(podcast))
             .route("/upload_object", web::post().to(upload_object))
             .route("/upload_form", web::post().to(upload_form))
+            .route("/upload", web::post().to(upload))
             .route("/get_auth", web::post().to(generate_session_token))
             .app_data(json_config.clone())
+            .app_data(multipart_form_config.clone())
             .app_data(db_conn_pool.clone())
             .app_data(s3_client.clone())
             .app_data(xmls.clone())

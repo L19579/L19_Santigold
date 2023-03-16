@@ -6,6 +6,11 @@ use {
         Multipart, ByteStream,
         ObjectCannedAcl, ActiveTokens,
         is_valid_token, 
+        MultipartForm,
+        /* MultipartCollect, */
+        MultipartFormJson,
+        MultipartFormText,
+        MultipartFormTempFile,
     },
     serde::{
         Serialize, Deserialize,
@@ -17,11 +22,14 @@ use {
         PgPool, types::Uuid,
     },
     std::{
+        fs,
         result::Result,
         io::Write,
         path::Path,
         fmt::Display,
+        sync::Mutex,
     },
+
    
 };
 
@@ -29,13 +37,25 @@ pub fn none() -> String{
     "NONE".to_string()
 }
 
+
+#[derive(MultipartForm)]
+pub struct PodcastDataV2{
+    /* 
+    pub channel: MultipartFormJson<Channel>,
+    pub items: Vec<MultipartFormJson<Item>>, 
+    pub session_token: MultipartFormText<String>, 
+    */
+    pub podcast_data: MultipartFormJson<PodcastData>,
+    pub audio: MultipartFormTempFile,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PodcastData{
     pub channel: Channel,
-    pub items: Vec<Item>,
+    pub item: Item,
     pub session_token: String,
 }
-
+/*
 impl PodcastData {
     pub fn item_ids(&self) -> Vec<String>{
         let mut ids = Vec::<String>::new(); 
@@ -45,6 +65,7 @@ impl PodcastData {
         return ids;
     }
 }
+*/
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Channel{
@@ -105,6 +126,12 @@ pub struct S3{
     pub bucket: String,
     pub full_link: String,
     pub temp_dir: String,
+}
+
+#[derive(Serialize, Deserialize, Clone,Debug)]
+struct UploadObjectResponse{
+    file_id: String,
+    file_size: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone,Debug)]
@@ -369,16 +396,39 @@ pub async fn edit_channel(
     }
 }
 
-/// Post media - d 
-// TODO should integrate this with upload_form() once working example complete; + unwraps 
-// Also need some way to squeeze session token in.
+/// POST multipart upload
+pub async fn upload(
+    payload: MultipartForm::<PodcastDataV2>, 
+    active_tokens: web::Data<RwLock<ActiveTokens>>,
+    s3: web::Data<S3>,
+) -> HttpResponse{
+    let podcast_data = payload.into_inner().podcast_data.into_inner();
+
+    if !is_valid_token(&podcast_data.session_token, active_tokens).await{
+        return HttpResponse::Unauthorized().finish();
+    } 
+
+    let file_id = format!("test_file_{}", Uuid::new_v4().to_string());
+
+
+    let session_token: String = podcast_data.session_token;
+    
+    return HttpResponse::Ok()
+        .content_type(ContentType::plaintext())
+        .body(session_token)
+}
+
+/* fn object_to_s3() */
+
+/// POST media file, return media file id and file size
 pub async fn upload_object(mut payload: Multipart, s3: web::Data<S3>) -> HttpResponse{
-    let mut file_id = String::new();
+    let temp_dir = s3.get_ref().temp_dir.clone();
+    let file_id = Uuid::new_v4().to_string();
+    let temp_file = format!("{}/{}", temp_dir, file_id);
+
     while let Ok(Some(mut field)) = payload.try_next().await{
-        let temp_dir = s3.get_ref().temp_dir.clone();
-        file_id = Uuid::new_v4().to_string();
-        let temp_file = format!("{}/{}", temp_dir, file_id);
-        let mut file = web::block(move|| std::fs::File::create(temp_file))
+        let temp_file = temp_file.clone(); // trading readability for clone.
+        let mut file = web::block(move|| std::fs::File::create(temp_file)) 
             .await
             .unwrap().unwrap(); //review
         while let  Some(chunk) = field.next().await{
@@ -388,16 +438,24 @@ pub async fn upload_object(mut payload: Multipart, s3: web::Data<S3>) -> HttpRes
                 .unwrap().unwrap() // review
         }
     }
+
+    let response = UploadObjectResponse{
+        file_id,
+        file_size: fs::metadata(&temp_file).unwrap().len(),
+    };
+   
+    let response = serde_json::ser::to_string(&response).unwrap();
+
     return HttpResponse::Ok()
-        .content_type(ContentType::plaintext())
-        .body(file_id);
+        .content_type(ContentType::json())
+        .body(response);
 }
 
 /// POST Channel/Episode - near // linode
 pub async fn upload_form(
     /* episode: web::Json<Item>, */
-    s3: web::Data<S3>,
     podcast_data: web::Json<PodcastData>,
+    s3: web::Data<S3>,
     active_tokens: web::Data<RwLock<ActiveTokens>>,
     pg_conn_pool: web::Data<PgPool>,
     xmls: web::Data<Arc<RwLock<Xml>>>
@@ -409,23 +467,23 @@ pub async fn upload_form(
 
     let podcast_data = &mut podcast_data.into_inner();
     let ch = &podcast_data.channel;
-    for file_id in &podcast_data.item_ids() {
-        let file_path = format!("{}/{}", s3.temp_dir, file_id);
-        if !Path::new(&file_path).exists(){
-            return HttpResponse::BadRequest()
-                .content_type(ContentType::plaintext())
-                .body("at least 1 file_id does not exist");
-        } 
-    }
-    let eps: &mut [Item] = &mut podcast_data.items;
+   //  for file_id in &podcast_data.item.id { 
+    let file_path = format!("{}/{}", s3.temp_dir, &podcast_data.item.id);
+    if !Path::new(&file_path).exists(){
+        return HttpResponse::BadRequest()
+            .content_type(ContentType::plaintext())
+            .body("at least 1 file_id does not exist");
+    } 
+    //}
+    let ep = &mut podcast_data.item;
     let mut potential_bad_ep_uploads = String::new();
-    eps.into_iter().for_each(|ep|{
-        if !(ch.external_id != ep.channel_id){
-            potential_bad_ep_uploads
-                .push_str(&format!("\n{}", ep.channel_id))
-        }
-        ep.enclosure = format!("{}/{}.mp3", &s3.full_link, &ep.id);
-    });
+    //eps.into_iter().for_each(|ep|{
+    if !(ch.external_id != ep.channel_id){
+        potential_bad_ep_uploads
+            .push_str(&format!("\n{}", ep.channel_id))
+    }
+    ep.enclosure = format!("{}/{}.mp3", &s3.full_link, &ep.id);
+    //});
 
     //TODO: This check threw an unexpected during test.
     /*
@@ -436,7 +494,7 @@ pub async fn upload_form(
     }
     */
 
-    upload_to_s3_bucket(&podcast_data.item_ids(), &s3).await.unwrap();
+    upload_to_s3_bucket(&[&podcast_data.item.id], &s3).await.unwrap();
     store_to_db(podcast_data, &pg_conn_pool).await.unwrap();
     let ch_external_id = podcast_data.channel.external_id.clone();
     let xml_pos = match xmls.read().unwrap().get_vec_pos(&ch_external_id){
@@ -534,7 +592,7 @@ async fn store_to_db(
     //TODO temp, this should rarely fail. Error is worth attention when it does.
     //Work on error handling.
     let ch = podcast_data.channel.clone(); // redo.
-    let eps: &[Item] = &podcast_data.items;
+    let ep = &podcast_data.item;
 
     if !(channel_exists(&ch.title, &pg_conn_pool).await){
         log::info!("TRACE -----------------------------  CREATING NEW CHANNEL ");
@@ -556,19 +614,19 @@ async fn store_to_db(
         .unwrap();
     }
    
-    for ep in eps{ // messy
-        sqlx::query!(r#"
-            INSERT INTO item (id, channel_id, ep_number, title, author, category, description, content_encoded,
-            enclosure, i_link, pub_date, itunes_subtitle, itunes_image, itunes_duration)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-            "#, Uuid::parse_str(&ep.id).unwrap(), Uuid::parse_str(&ep.channel_id).unwrap(), ep.ep_number, ep.title, 
-            ep.author, ep.category, ep.description, ep.content_encoded, ep.enclosure, ep.i_link, ep.pub_date, 
-            ep.itunes_subtitle.clone(), ep.itunes_image.clone(), 
-            ep.itunes_duration.clone(),
-        ).execute(pg_conn_pool.get_ref())
-        .await
-        .unwrap();
-    };
+    //for ep in eps{ // messy
+    sqlx::query!(r#"
+        INSERT INTO item (id, channel_id, ep_number, title, author, category, description, content_encoded,
+        enclosure, i_link, pub_date, itunes_subtitle, itunes_image, itunes_duration)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        "#, Uuid::parse_str(&ep.id).unwrap(), Uuid::parse_str(&ep.channel_id).unwrap(), ep.ep_number, ep.title, 
+        ep.author, ep.category, ep.description, ep.content_encoded, ep.enclosure, ep.i_link, ep.pub_date, 
+        ep.itunes_subtitle.clone(), ep.itunes_image.clone(), 
+        ep.itunes_duration.clone(),
+    ).execute(pg_conn_pool.get_ref())
+    .await
+    .unwrap();
+    //};
 
     return Ok(());
 }

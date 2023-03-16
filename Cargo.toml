@@ -13,7 +13,7 @@ env_logger = "*"
 serde_json = "*"
 actix-cors = "*"
 futures = "0.3.26"
-actix-multipart = "0.5.0"
+actix-multipart = "0.6.0"
 aws-sdk-s3 = "0.24.0"
 
 [dependencies.tokio]
