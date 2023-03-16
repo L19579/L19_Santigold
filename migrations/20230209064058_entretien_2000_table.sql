@@ -47,7 +47,10 @@ CREATE TABLE item(
   -- repeat of description with formatting. Primary desc.
   content_encoded TEXT NOT NULL,
   -- direct link to mp3
-  enclosure TEXT NOT NULL,
+  enclosure_url TEXT NOT NULL,
+  enclosure_type TEXT NOT NULL,
+  -- file size in bytes.
+  enclosure_length TEXT NOT NULL,
   -- episode page link
   i_link TEXT NOT NULL,
   pub_date TEXT NOT NULL,

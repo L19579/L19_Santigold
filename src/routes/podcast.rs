@@ -33,18 +33,8 @@ use {
    
 };
 
-pub fn none() -> String{
-    "NONE".to_string()
-}
-
-
 #[derive(MultipartForm)]
 pub struct PodcastDataV2{
-    /* 
-    pub channel: MultipartFormJson<Channel>,
-    pub items: Vec<MultipartFormJson<Item>>, 
-    pub session_token: MultipartFormText<String>, 
-    */
     pub podcast_data: MultipartFormJson<PodcastData>,
     pub audio: MultipartFormTempFile,
 }
@@ -55,17 +45,6 @@ pub struct PodcastData{
     pub item: Item,
     pub session_token: String,
 }
-/*
-impl PodcastData {
-    pub fn item_ids(&self) -> Vec<String>{
-        let mut ids = Vec::<String>::new(); 
-        for item in &self.items{
-            ids.push(item.id.clone());
-        }
-        return ids;
-    }
-}
-*/
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Channel{
@@ -105,10 +84,12 @@ pub struct Item{
     pub category: String,
     pub description: String,
     pub content_encoded: String,
-    pub enclosure: String,
+    pub enclosure_url: String,
+    pub enclosure_type: String,
+    pub enclosure_length: String,
     pub i_link: String,
     pub pub_date: String,
-    //optional
+    //optional; maybe not. Podcatchers weirdly reliant on itune tags
     pub itunes_subtitle: String,
     pub itunes_image: String,
     pub itunes_duration: String,
@@ -152,37 +133,37 @@ impl Xml {
         let channels: Vec<_> = futures::executor::block_on(
             sqlx::query!(r#"SELECT * FROM channel"#).fetch_all(&pg_conn_pool))
             .unwrap();
-        let xmls = Xml{
+        let xml = Xml{
             external_ids: Vec::new(),
             titles: Vec::new(),
             //titles: vec!["Test Podcast Name".to_string()],
             buffers: Vec::new(),
         }; 
-        let xmls = Arc::new(RwLock::new(xmls));
+        let xml = Arc::new(RwLock::new(xml));
         for ch in channels.into_iter() {
             let external_id = ch.external_id.to_string();
 
-            // following block resolves issue we had w/ future that wasn't being polled to
-            // completion. Messy. REFACTOR- TODO.
             {
-                let xmls = xmls.clone();
+                let xml = xml.clone();
                 let external_id = external_id.clone();
                 let pg_conn_pool = pg_conn_pool.clone();
-                let handle = tokio::spawn( async move {
-                    let res = refresh_xml_buffer(&external_id.clone(), &pg_conn_pool.clone()).await.unwrap();
-                    xmls.write().unwrap().buffers.push(res);
+                tokio::spawn( async move {
+                    let buffer = refresh_xml_buffer(&external_id.clone(), &pg_conn_pool.clone()).await.unwrap();
+                    xml.write().unwrap().buffers.push(buffer);
                 });
-
-                std::thread::sleep(std::time::Duration::from_secs(10));
-                handle.abort();
+                // we don't need to abort. tokio::spawn's handle. Handles itself. No join(). 
+                //std::thread::sleep(std::time::Duration::from_secs(10));
+                //handle.abort();
             }
 
-
-            xmls.write().unwrap().external_ids.push(external_id.clone().to_string()); // temp
-            xmls.write().unwrap().titles.push(ch.title.clone());
+            xml.write().unwrap().external_ids.push(external_id.clone().to_string()); // temp
+            xml.write().unwrap().titles.push(ch.title.clone());
         }
-        std::thread::sleep(std::time::Duration::from_secs(10)); 
-        return Arc::try_unwrap(xmls).unwrap().into_inner().unwrap();
+        
+        while Arc::strong_count(&xml) > 1{
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        }
+        return Arc::try_unwrap(xml).unwrap().into_inner().unwrap();
     } 
 
     pub fn get_vec_pos(&self, requested_id: &str) -> Option<usize> {
@@ -313,7 +294,9 @@ pub async fn episode(
         author: res.author,
         category: res.category,
         content_encoded: res.content_encoded,
-        enclosure: res.enclosure,
+        enclosure_url: res.enclosure_url,
+        enclosure_type: res.enclosure_type,
+        enclosure_length: res.enclosure_length,
         i_link: res.i_link,
         pub_date: res.pub_date,
         itunes_subtitle: res.itunes_subtitle,
@@ -327,10 +310,6 @@ pub async fn episode(
     return HttpResponse::Ok()
         .content_type(ContentType::json())
         .body(response_ser_json);
-
-    /* HttpResponse::Ok() // --- cleaner tbh
-        .json(res_body);
-    */
 }
 
 /// POST modify episode metadata - d
@@ -349,11 +328,11 @@ pub async fn edit_episode(
 
     match sqlx::query!(r#"
         UPDATE item SET channel_id = $1, ep_number = $2, title = $3, author = $4, description = $5,
-        content_encoded = $6, enclosure = $7, i_link = $8, pub_date = $9, itunes_subtitle = $10,
-        itunes_image = $11, itunes_duration = $12 WHERE id = $13
+        content_encoded = $6, enclosure_url = $7, enclosure_type = $8, enclosure_length = $9, i_link = $10, 
+        pub_date = $11, itunes_subtitle = $12, itunes_image = $13, itunes_duration = $14 WHERE id = $15
         "#, Uuid::parse_str(&ep.channel_id).unwrap(), ep.ep_number, ep.author, ep.category, ep.description,
-        ep.content_encoded, ep.enclosure, ep.i_link, ep.pub_date, ep.itunes_subtitle,
-        ep.itunes_image, ep.itunes_duration,
+        ep.content_encoded, ep.enclosure_url, ep.enclosure_type, ep.enclosure_length, ep.i_link, 
+        ep.pub_date, ep.itunes_subtitle, ep.itunes_image, ep.itunes_duration,
         Uuid::parse_str(&ep.id).unwrap()
     ).execute(pg_conn_pool.get_ref()).await{
         Ok(_) => HttpResponse::Ok().finish(),
@@ -400,19 +379,75 @@ pub async fn edit_channel(
 pub async fn upload(
     payload: MultipartForm::<PodcastDataV2>, 
     active_tokens: web::Data<RwLock<ActiveTokens>>,
+    pg_conn_pool: web::Data<PgPool>,
+    xml: web::Data<RwLock<Xml>>,
     s3: web::Data<S3>,
 ) -> HttpResponse{
-    let podcast_data = payload.into_inner().podcast_data.into_inner();
+    let mut podcast_data = payload.podcast_data.clone();
 
     if !is_valid_token(&podcast_data.session_token, active_tokens).await{
         return HttpResponse::Unauthorized().finish();
     } 
 
-    let file_id = format!("test_file_{}", Uuid::new_v4().to_string());
+    let ch = podcast_data.channel.clone();
+    let ep = &mut podcast_data.item;
 
+    if ch.external_id != ep.channel_id{
+        return HttpResponse::BadRequest()
+            .content_type(ContentType::plaintext())
+            .body(format!("channel_id and episode do not match"));
+    }
 
-    let session_token: String = podcast_data.session_token;
+    ep.id = Uuid::new_v4().to_string();
+    ep.enclosure_url = format!("{}/{}.mp3", &s3.full_link, &ep.id);
+    ep.enclosure_type = "audio/mpeg".to_string();
+    ep.enclosure_length = payload.audio.size.to_string();
+
+    match upload_to_s3_bucket_v2(&ep.id, &payload.audio.file.path(), &s3)
+        .await{
+            Ok(_) => {},
+            Err(e) => {
+                log::info!("Error -- podcast::upload(): upload_to_s3() unsuccessful. Err: {}", e);
+                return HttpResponse::InternalServerError()
+                    .content_type(ContentType::plaintext())
+                    .body(e);
+            },
+        };
+
+    match store_to_db(&podcast_data, &pg_conn_pool).await{
+        Ok(_) => {},
+        Err(e) => {
+            log::info!("Error -- podcast::upload(): store_to_db() unsuccessful. Err: {}", e);
+            _ = delete_from_s3_bucket(&podcast_data.item.id, &s3).await.unwrap(); // fails are silent.
+            return HttpResponse::InternalServerError()
+                .content_type(ContentType::plaintext())
+                .body(e);
+        }
+    }; 
     
+    let xml = xml.get_ref();
+    let xml_pos = match xml.read().unwrap().get_vec_pos(&ch.external_id){
+        Some(pos) => pos,
+        None => {
+            return HttpResponse::InternalServerError()
+                .content_type(ContentType::plaintext())
+                .body("could not find xml buffer");
+        }
+    };
+        
+    xml.write().unwrap().buffers[xml_pos] = 
+        match refresh_xml_buffer(&ch.external_id, &pg_conn_pool).await{
+            Ok(b) => b,
+            Err(err) => {
+                let e = format!("could not refresh_xml_buffer; Err: {}", err);
+                log::info!("{}", e);
+                return HttpResponse::InternalServerError()
+                    .content_type(ContentType::plaintext())
+                    .body(e);
+            }
+        };
+
+    let session_token = (&podcast_data.session_token).to_string();
     return HttpResponse::Ok()
         .content_type(ContentType::plaintext())
         .body(session_token)
@@ -453,12 +488,11 @@ pub async fn upload_object(mut payload: Multipart, s3: web::Data<S3>) -> HttpRes
 
 /// POST Channel/Episode - near // linode
 pub async fn upload_form(
-    /* episode: web::Json<Item>, */
     podcast_data: web::Json<PodcastData>,
     s3: web::Data<S3>,
     active_tokens: web::Data<RwLock<ActiveTokens>>,
     pg_conn_pool: web::Data<PgPool>,
-    xmls: web::Data<Arc<RwLock<Xml>>>
+    xml: web::Data<Arc<RwLock<Xml>>>
 ) -> HttpResponse {
 
     if !is_valid_token(&podcast_data.session_token, active_tokens).await{
@@ -477,15 +511,18 @@ pub async fn upload_form(
     //}
     let ep = &mut podcast_data.item;
     let mut potential_bad_ep_uploads = String::new();
+
     //eps.into_iter().for_each(|ep|{
-    if !(ch.external_id != ep.channel_id){
+    if ch.external_id != ep.channel_id{
         potential_bad_ep_uploads
             .push_str(&format!("\n{}", ep.channel_id))
     }
-    ep.enclosure = format!("{}/{}.mp3", &s3.full_link, &ep.id);
+    ep.enclosure_url = format!("{}/{}.mp3", &s3.full_link, &ep.id);
+    ep.enclosure_type = "audio/mpeg".to_string();
+    ep.enclosure_length = fs::metadata(&file_path).unwrap().len().to_string();
     //});
 
-    //TODO: This check threw an unexpected during test.
+    //TODO: This check threw an unexpected during test. << Resolved: had a double negative above. 
     /*
     if potential_bad_ep_uploads.len() != 0 {
         return HttpResponse::BadRequest()
@@ -497,7 +534,7 @@ pub async fn upload_form(
     upload_to_s3_bucket(&[&podcast_data.item.id], &s3).await.unwrap();
     store_to_db(podcast_data, &pg_conn_pool).await.unwrap();
     let ch_external_id = podcast_data.channel.external_id.clone();
-    let xml_pos = match xmls.read().unwrap().get_vec_pos(&ch_external_id){
+    let xml_pos = match xml.read().unwrap().get_vec_pos(&ch_external_id){
         Some(pos) => pos,
         None => {
             return HttpResponse::InternalServerError()
@@ -505,12 +542,57 @@ pub async fn upload_form(
                 .body("could not find xml buffer");
         },
     };
-    let mut xmls = xmls.write().unwrap();
+    let mut xml = xml.write().unwrap();
     // TODO: Can improve ; also should be updating xml vects for new podcasts. TODO -- CRITICAL
-    xmls.buffers[xml_pos] = refresh_xml_buffer(&ch_external_id, pg_conn_pool.get_ref()).await.unwrap();
+    xml.buffers[xml_pos] = refresh_xml_buffer(&ch_external_id, pg_conn_pool.get_ref()).await.unwrap();
     HttpResponse::Ok()
         .content_type(ContentType::plaintext())
         .body("upload complete")
+}
+
+async fn upload_to_s3_bucket_v2(ep_id: &str, path: &Path, s3: &web::Data<S3>) -> Result<(), &'static str>{
+    let s3 = s3.get_ref();
+    let path = match path.to_str(){
+        Some(p) => p,
+        None => {
+            return Err("invalid unicode or non existent path.")
+        },
+    };
+
+    let stream = ByteStream::from_path(path)
+        .await
+        .unwrap();
+    
+    return match s3.client.put_object()
+        .bucket(&s3.bucket)
+        .key(format!("{}.mp3", ep_id))
+        .acl(ObjectCannedAcl::PublicRead)
+        .content_type("application/mp3")
+        .body(stream)
+        .send()
+        .await{
+            Ok(_) => Ok(()),
+            Err(_) => {
+                let e = "Failed to upload to S3.";
+                log::error!("{}", e);
+                Err(e)
+            }
+        };
+}
+
+async fn delete_from_s3_bucket(ep_id: &str, s3: &web::Data<S3>) -> Result<(), &'static str>{
+    return match s3.client.delete_object()
+        .bucket(&s3.bucket)
+        .key(format!("{}.mp3", ep_id))
+        .send()
+        .await{
+            Ok(_) => Ok(()),
+            Err(_) => {
+                let e = "Failed to delete from S3.";
+                log::error!("{}", e);
+                Err(e)
+            }
+        };
 }
 
 // TODO: partial upload if some succeed. CRITICAL - leaves good uploads on server if all fail.
@@ -617,12 +699,11 @@ async fn store_to_db(
     //for ep in eps{ // messy
     sqlx::query!(r#"
         INSERT INTO item (id, channel_id, ep_number, title, author, category, description, content_encoded,
-        enclosure, i_link, pub_date, itunes_subtitle, itunes_image, itunes_duration)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        enclosure_url, enclosure_type, enclosure_length, i_link, pub_date, itunes_subtitle, itunes_image, itunes_duration)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         "#, Uuid::parse_str(&ep.id).unwrap(), Uuid::parse_str(&ep.channel_id).unwrap(), ep.ep_number, ep.title, 
-        ep.author, ep.category, ep.description, ep.content_encoded, ep.enclosure, ep.i_link, ep.pub_date, 
-        ep.itunes_subtitle.clone(), ep.itunes_image.clone(), 
-        ep.itunes_duration.clone(),
+        ep.author, ep.category, ep.description, ep.content_encoded, ep.enclosure_url, ep.enclosure_type, ep.enclosure_length, 
+        ep.i_link, ep.pub_date, ep.itunes_subtitle.clone(), ep.itunes_image.clone(), ep.itunes_duration.clone(),
     ).execute(pg_conn_pool.get_ref())
     .await
     .unwrap();
@@ -710,7 +791,9 @@ async fn refresh_xml_buffer(
                 category: item_res.category.clone(),
                 description: item_res.description.clone(),
                 content_encoded: item_res.content_encoded.clone(),
-                enclosure: item_res.enclosure.clone(),
+                enclosure_url: item_res.enclosure_url.clone(),
+                enclosure_type: item_res.enclosure_type.clone(),
+                enclosure_length: item_res.enclosure_length.clone(),
                 i_link: item_res.i_link.clone(),
                 pub_date: item_res.pub_date.clone(),
                 itunes_subtitle: itunes_subtitle.to_string(),
@@ -797,11 +880,11 @@ async fn refresh_xml_buffer(
                 <category><![CDATA[{}]]></category>
                 <description>{}</description>
                 <content:encoded>{}</content:encoded>
-                <enclosure url="{}" />
+                <enclosure url="{}" type="{}" length="{}"/>
                 <itunes:summary>{}</itunes:summary>
             </item>
         "#, item.title, item.author, item.i_link, item.pub_date, item.id, item.category, item.description, item.content_encoded
-        , item.enclosure, item.description, /* item.itunes_duration */));
+        , item.enclosure_url, item.enclosure_type, item.enclosure_length, item.description, /* item.itunes_duration */));
     }
  
     xml_buffer.push_str(
