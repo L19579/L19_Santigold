@@ -9,7 +9,6 @@ use {
         MultipartForm,
         /* MultipartCollect, */
         MultipartFormJson,
-        MultipartFormText,
         MultipartFormTempFile,
     },
     serde::{
@@ -27,7 +26,6 @@ use {
         io::Write,
         path::Path,
         fmt::Display,
-        sync::Mutex,
     },
 
    
@@ -140,15 +138,15 @@ impl Xml {
             buffers: Vec::new(),
         }; 
         let xml = Arc::new(RwLock::new(xml));
-        for ch in channels.into_iter() {
+        for ch in channels.iter() {
             let external_id = ch.external_id.to_string();
-
             {
                 let xml = xml.clone();
                 let external_id = external_id.clone();
                 let pg_conn_pool = pg_conn_pool.clone();
                 tokio::spawn( async move {
                     let buffer = refresh_xml_buffer(&external_id.clone(), &pg_conn_pool.clone()).await.unwrap();
+
                     xml.write().unwrap().buffers.push(buffer);
                 });
                 // we don't need to abort. tokio::spawn's handle. Handles itself. No join(). 
@@ -342,6 +340,10 @@ pub async fn edit_episode(
     }
 }
 
+pub async fn replace_episode_audio() -> HttpResponse{
+    todo!() 
+}
+
 /// POST modify channel metadata - d
 pub async fn edit_channel(
     updated_ch: web::Json<Channel>,
@@ -375,12 +377,13 @@ pub async fn edit_channel(
     }
 }
 
-/// POST multipart upload
+/// POST multipart upload. Note: new id is assigned for episodes by default.
+/// use edit_episode() or replace_episode_audio() to change current records
 pub async fn upload(
     payload: MultipartForm::<PodcastDataV2>, 
     active_tokens: web::Data<RwLock<ActiveTokens>>,
     pg_conn_pool: web::Data<PgPool>,
-    xml: web::Data<RwLock<Xml>>,
+    xml: web::Data<Arc<RwLock<Xml>>>,
     s3: web::Data<S3>,
 ) -> HttpResponse{
     let mut podcast_data = payload.podcast_data.clone();
@@ -414,7 +417,7 @@ pub async fn upload(
             },
         };
 
-    match store_to_db(&podcast_data, &pg_conn_pool).await{
+    match store_to_db(&mut podcast_data, &pg_conn_pool).await{
         Ok(_) => {},
         Err(e) => {
             log::info!("Error -- podcast::upload(): store_to_db() unsuccessful. Err: {}", e);
@@ -425,13 +428,13 @@ pub async fn upload(
         }
     }; 
     
-    let xml = xml.get_ref();
+    /* let xml = xml.get_ref();  */
     let xml_pos = match xml.read().unwrap().get_vec_pos(&ch.external_id){
         Some(pos) => pos,
         None => {
             return HttpResponse::InternalServerError()
                 .content_type(ContentType::plaintext())
-                .body("could not find xml buffer");
+                .body("could not find xml buffer ---- no vec pos --- 439");
         }
     };
         
@@ -447,10 +450,9 @@ pub async fn upload(
             }
         };
 
-    let session_token = (&podcast_data.session_token).to_string();
     return HttpResponse::Ok()
         .content_type(ContentType::plaintext())
-        .body(session_token)
+        .body("upload successful!")
 }
 
 /* fn object_to_s3() */
@@ -668,16 +670,16 @@ async fn episode_exists(
 
 /// store episode data in db - d
 async fn store_to_db(
-    podcast_data: &PodcastData, 
+    podcast_data: &mut PodcastData, 
     pg_conn_pool: &web::Data<PgPool>,
 )-> Result<(), &'static str>{
     //TODO temp, this should rarely fail. Error is worth attention when it does.
     //Work on error handling.
     let ch = podcast_data.channel.clone(); // redo.
-    let ep = &podcast_data.item;
+    let ep = &mut podcast_data.item;
 
     if !(channel_exists(&ch.title, &pg_conn_pool).await){
-        log::info!("TRACE -----------------------------  CREATING NEW CHANNEL ");
+        let new_external_id = Uuid::new_v4();
         sqlx::query!(r#"
             INSERT INTO channel (external_id, title, category, description, managing_editor,
             generator, image_url, image_title, image_link, image_width, image_height, language,
@@ -685,7 +687,7 @@ async fn store_to_db(
             itunes_owner_email, sy_update_period, sy_update_frequency)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
             $17, $18, $19, $20, $21)
-            "#, Uuid::new_v4(), ch.title, ch.category, ch.description, 
+            "#, new_external_id, ch.title, ch.category, ch.description, 
             ch.managing_editor, ch.generator, ch.image_url, ch.image_title, ch.image_link, ch.image_width, 
             ch.image_height, ch.language,ch.last_build_date, ch.pub_date, ch.c_link, 
             ch.itunes_new_feed_url, ch.itunes_explicit, 
@@ -694,6 +696,8 @@ async fn store_to_db(
         ).execute(pg_conn_pool.get_ref())
         .await
         .unwrap();
+
+        ep.channel_id = new_external_id.to_string();
     }
    
     //for ep in eps{ // messy
@@ -811,6 +815,8 @@ async fn refresh_xml_buffer(
      3. drop comment tags, wellformedweb isn't a thing anymore.
     */
    let mut xml_buffer = format!(r#"<?xml version="1.0" encoding="UTF-8"?>
+    <!-- Generator by Junandre Paul / www.L19579.com -->
+    <!-- Générateur par Junandre Paul / www.L19579.com -->
     <rss version="2.0"
         xmlns:content="http://purl.org/rss/1.0/modules/content/"
         xmlns:wfw="http://wellformedweb.org/CommentAPI/"
