@@ -126,41 +126,41 @@ pub struct Xml{
 }
 
 impl Xml {
+    fn add_channel(&mut self, ch_id: String, ch_title: String){
+        self.external_ids.push(ch_id);
+        self.titles.push(ch_title);
+        self.buffers.push(String::new());
+    }
+
     pub fn initialize(pg_conn_pool: PgPool) -> Self{
 
-        let channels: Vec<_> = futures::executor::block_on(
-            sqlx::query!(r#"SELECT * FROM channel"#).fetch_all(&pg_conn_pool))
-            .unwrap();
-        let xml = Xml{
+        let xml = Arc::new(RwLock::new(Xml{
             external_ids: Vec::new(),
             titles: Vec::new(),
-            //titles: vec!["Test Podcast Name".to_string()],
             buffers: Vec::new(),
-        }; 
-        let xml = Arc::new(RwLock::new(xml));
-        for ch in channels.iter() {
-            let external_id = ch.external_id.to_string();
-            {
-                let xml = xml.clone();
-                let external_id = external_id.clone();
-                let pg_conn_pool = pg_conn_pool.clone();
-                tokio::spawn( async move {
-                    let buffer = refresh_xml_buffer(&external_id.clone(), &pg_conn_pool.clone()).await.unwrap();
+        })); 
 
+        {
+            let channels = futures::executor::block_on(
+                sqlx::query!(r#"SELECT * FROM channel"#).fetch_all(&pg_conn_pool))
+                .unwrap();
+            let xml = xml.clone();
+            let pg_conn_pool = pg_conn_pool.clone();
+
+            tokio::spawn( async move {
+                for ch in channels.iter(){
+                    let buffer = refresh_xml_buffer(&ch.external_id.to_string(), &pg_conn_pool).await.unwrap();              
                     xml.write().unwrap().buffers.push(buffer);
-                });
-                // we don't need to abort. tokio::spawn's handle. Handles itself. No join(). 
-                //std::thread::sleep(std::time::Duration::from_secs(10));
-                //handle.abort();
-            }
-
-            xml.write().unwrap().external_ids.push(external_id.clone().to_string()); // temp
-            xml.write().unwrap().titles.push(ch.title.clone());
-        }
+                    xml.write().unwrap().external_ids.push(ch.external_id.to_string());
+                    xml.write().unwrap().titles.push(ch.title.clone());
+                }     
+            });
+        } 
         
-        while Arc::strong_count(&xml) > 1{
+        while Arc::strong_count(&xml) > 1{ // wait til tokio::spawn is through with xml
             std::thread::sleep(std::time::Duration::from_secs(5));
         }
+
         return Arc::try_unwrap(xml).unwrap().into_inner().unwrap();
     } 
 
@@ -186,7 +186,6 @@ impl Xml {
 
 /// GET RSS feed - d
 pub async fn podcast(
-    /* form: web::Form<XmlRequestForm>, */
     ch_title: web::Path<String>,
     xml: web::Data<Arc<RwLock<Xml>>>
 ) -> HttpResponse{
@@ -392,7 +391,7 @@ pub async fn upload(
         return HttpResponse::Unauthorized().finish();
     } 
 
-    let ch = podcast_data.channel.clone();
+    let mut ch = podcast_data.channel.clone();
     let ep = &mut podcast_data.item;
 
     if ch.external_id != ep.channel_id{
@@ -417,8 +416,8 @@ pub async fn upload(
             },
         };
 
-    match store_to_db(&mut podcast_data, &pg_conn_pool).await{
-        Ok(_) => {},
+    ch.external_id = match store_to_db(&mut podcast_data, &pg_conn_pool, &xml).await{
+        Ok(ext_id) => ext_id,
         Err(e) => {
             log::info!("Error -- podcast::upload(): store_to_db() unsuccessful. Err: {}", e);
             _ = delete_from_s3_bucket(&podcast_data.item.id, &s3).await.unwrap(); // fails are silent.
@@ -427,8 +426,8 @@ pub async fn upload(
                 .body(e);
         }
     }; 
-    
-    /* let xml = xml.get_ref();  */
+   
+    /* std::thread::sleep(std::time::Duration::from_secs(10)); */
     let xml_pos = match xml.read().unwrap().get_vec_pos(&ch.external_id){
         Some(pos) => pos,
         None => {
@@ -455,8 +454,6 @@ pub async fn upload(
         .body("upload successful!")
 }
 
-/* fn object_to_s3() */
-
 /// POST media file, return media file id and file size
 pub async fn upload_object(mut payload: Multipart, s3: web::Data<S3>) -> HttpResponse{
     let temp_dir = s3.get_ref().temp_dir.clone();
@@ -464,15 +461,15 @@ pub async fn upload_object(mut payload: Multipart, s3: web::Data<S3>) -> HttpRes
     let temp_file = format!("{}/{}", temp_dir, file_id);
 
     while let Ok(Some(mut field)) = payload.try_next().await{
-        let temp_file = temp_file.clone(); // trading readability for clone.
+        let temp_file = temp_file.clone();
         let mut file = web::block(move|| std::fs::File::create(temp_file)) 
             .await
-            .unwrap().unwrap(); //review
+            .unwrap().unwrap(); //review TODO
         while let  Some(chunk) = field.next().await{
             let data = chunk.unwrap();
             file = web::block(move|| file.write_all(&data).map(|_| file) )
                 .await
-                .unwrap().unwrap() // review
+                .unwrap().unwrap() // review TODO
         }
     }
 
@@ -503,38 +500,29 @@ pub async fn upload_form(
 
     let podcast_data = &mut podcast_data.into_inner();
     let ch = &podcast_data.channel;
-   //  for file_id in &podcast_data.item.id { 
+
     let file_path = format!("{}/{}", s3.temp_dir, &podcast_data.item.id);
     if !Path::new(&file_path).exists(){
         return HttpResponse::BadRequest()
             .content_type(ContentType::plaintext())
             .body("at least 1 file_id does not exist");
     } 
-    //}
-    let ep = &mut podcast_data.item;
-    let mut potential_bad_ep_uploads = String::new();
 
-    //eps.into_iter().for_each(|ep|{
+    let ep = &mut podcast_data.item;
+
     if ch.external_id != ep.channel_id{
-        potential_bad_ep_uploads
-            .push_str(&format!("\n{}", ep.channel_id))
+        return HttpResponse::BadRequest()
+            .content_type(ContentType::plaintext())
+            .body("ch.external_id != ep.channel_id. \n");
     }
     ep.enclosure_url = format!("{}/{}.mp3", &s3.full_link, &ep.id);
     ep.enclosure_type = "audio/mpeg".to_string();
     ep.enclosure_length = fs::metadata(&file_path).unwrap().len().to_string();
-    //});
 
-    //TODO: This check threw an unexpected during test. << Resolved: had a double negative above. 
-    /*
-    if potential_bad_ep_uploads.len() != 0 {
-        return HttpResponse::BadRequest()
-            .content_type(ContentType::plaintext())
-            .body(format!("wrong channel_id's for episodes: \n{}", potential_bad_ep_uploads));
-    }
-    */
 
     upload_to_s3_bucket(&[&podcast_data.item.id], &s3).await.unwrap();
-    store_to_db(podcast_data, &pg_conn_pool).await.unwrap();
+    podcast_data.channel.external_id = store_to_db(podcast_data, &pg_conn_pool, &xml)
+        .await.unwrap();
     let ch_external_id = podcast_data.channel.external_id.clone();
     let xml_pos = match xml.read().unwrap().get_vec_pos(&ch_external_id){
         Some(pos) => pos,
@@ -545,7 +533,6 @@ pub async fn upload_form(
         },
     };
     let mut xml = xml.write().unwrap();
-    // TODO: Can improve ; also should be updating xml vects for new podcasts. TODO -- CRITICAL
     xml.buffers[xml_pos] = refresh_xml_buffer(&ch_external_id, pg_conn_pool.get_ref()).await.unwrap();
     HttpResponse::Ok()
         .content_type(ContentType::plaintext())
@@ -598,7 +585,7 @@ async fn delete_from_s3_bucket(ep_id: &str, s3: &web::Data<S3>) -> Result<(), &'
 }
 
 // TODO: partial upload if some succeed. CRITICAL - leaves good uploads on server if all fail.
-// Note impl Display for test.
+// Note impl Display for test. // UPDATE: addressed in upload(). Marked for removal.
 /// upload to s3, failure control not implemented
 async fn upload_to_s3_bucket(file_ids: &[impl Display], s3: &web::Data<S3>) -> Result<(), &'static str>{
     let s3 = s3.get_ref();
@@ -672,7 +659,8 @@ async fn episode_exists(
 async fn store_to_db(
     podcast_data: &mut PodcastData, 
     pg_conn_pool: &web::Data<PgPool>,
-)-> Result<(), &'static str>{
+    xml: &web::Data<Arc<RwLock<Xml>>>,
+)-> Result<String, &'static str>{
     //TODO temp, this should rarely fail. Error is worth attention when it does.
     //Work on error handling.
     let ch = podcast_data.channel.clone(); // redo.
@@ -698,9 +686,9 @@ async fn store_to_db(
         .unwrap();
 
         ep.channel_id = new_external_id.to_string();
+        xml.write().unwrap().add_channel(ch.external_id.to_string(), ch.title);
     }
    
-    //for ep in eps{ // messy
     sqlx::query!(r#"
         INSERT INTO item (id, channel_id, ep_number, title, author, category, description, content_encoded,
         enclosure_url, enclosure_type, enclosure_length, i_link, pub_date, itunes_subtitle, itunes_image, itunes_duration)
@@ -711,9 +699,8 @@ async fn store_to_db(
     ).execute(pg_conn_pool.get_ref())
     .await
     .unwrap();
-    //};
 
-    return Ok(());
+    return Ok(ch.external_id);
 }
 
 /// refresh xml with updated db data
@@ -766,15 +753,7 @@ async fn refresh_xml_buffer(
         ch_external_id,
         ).fetch_all(pg_conn_pool)
         .await.unwrap();
-       /* 
-        {
-            Ok(items) => items,
-            Err(_) => Vec::new(),
-        };
-        */
-    // Used to for chronological output to xml
-    // Rethinking immediate need for this atm. Postgres stays chronological.
-    //let mut current_ep_num = 1; 
+
     let mut items = Vec::<Item>::new();
     for item_res in &items_res{
         if 1 == 1 {
@@ -806,7 +785,6 @@ async fn refresh_xml_buffer(
             
             });
         }
-        //current_ep_num += 1;
     }  
 
     /*TODO: 
